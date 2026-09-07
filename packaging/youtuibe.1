@@ -1,0 +1,38 @@
+.TH YOUTUIBE 1 "September 2026" "youTUIbe 0.1.0"
+.SH NAME
+youtuibe \- terminal media search, playback, and download manager
+.SH SYNOPSIS
+.B youtuibe
+.RI [ OPTIONS ] " [URL ...]"
+.SH DESCRIPTION
+youTUIbe provides an interactive yt-dlp frontend with presets, a persistent
+download queue, media search, artwork, and mpv playback controls.
+.SH OPTIONS
+.TP
+.BI --state " PATH"
+Use a separate state file.
+.TP
+.BI "-o, --output " PATH
+Set the download directory for this and future sessions.
+.TP
+.B --no-mouse
+Disable terminal mouse capture.
+.TP
+.B -h, --help
+Show command help.
+.TP
+.B -V, --version
+Show the version.
+.SH CONTROLS
+Keys 1 through 7 switch tabs. Slash edits input. Question mark opens help.
+On Search, p plays audio, P plays video, Space pauses, x stops,
+Left/Right seek, minus/plus change volume, and m toggles mute.
+Square brackets change video quality; braces change audio quality.
+Enter opens the download builder; a queues a download. q saves and quits.
+.SH FILES
+.I ~/.local/share/youtuibe/state.json
+stores settings and jobs. The legacy Tide state is imported on first launch.
+.SH SEE ALSO
+.BR yt-dlp (1),
+.BR mpv (1),
+.BR ffmpeg (1)

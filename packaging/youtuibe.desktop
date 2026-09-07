@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=youTUIbe
+Comment=Search, play, and download media from your terminal
+Exec=youtuibe
+Icon=multimedia-video-player
+Terminal=true
+Categories=AudioVideo;Network;
+Keywords=YouTube;yt-dlp;download;audio;video;

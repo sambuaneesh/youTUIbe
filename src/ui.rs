@@ -1,7 +1,9 @@
 use crate::{
     app::{App, ClickAction, Hit, Modal, PlaybackState, SearchFormatChoice, Tab},
     model::{DownloadStatus, Job},
+    ytdlp::PlayerMode,
 };
+use image::imageops::FilterType;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
@@ -12,7 +14,7 @@ use ratatui::{
         Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Tabs, Wrap,
     },
 };
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
 const BG: Color = Color::Rgb(7, 11, 17);
@@ -34,10 +36,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     if area.width < 72 || area.height < 22 {
         frame.render_widget(
-            Paragraph::new("Tide needs a terminal at least 72×22.\nResize the window to continue.")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(ORANGE))
-                .block(panel(" Terminal too small ")),
+            Paragraph::new(
+                "youTUIbe needs a terminal at least 72×22.\nResize the window to continue.",
+            )
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(ORANGE))
+            .block(panel(" Terminal too small ")),
             centered(54, 7, area),
         );
         return;
@@ -92,7 +96,7 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
         .count();
     let mut spans = vec![
         Span::styled(
-            "  ◉  TIDE",
+            "  ◉  youTUIbe",
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  media, your way", Style::default().fg(MUTED)),
@@ -104,7 +108,14 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("✓ {done} complete"), Style::default().fg(CYAN)),
     ];
     if app.playback_state != PlaybackState::Stopped {
-        spans.push(Span::styled("    ♫ ", Style::default().fg(CYAN)));
+        spans.push(Span::styled(
+            if app.playback_mode == PlayerMode::Video {
+                "    ▷ "
+            } else {
+                "    ♫ "
+            },
+            Style::default().fg(CYAN),
+        ));
         spans.push(Span::styled(
             format!(
                 "{} · {}",
@@ -431,26 +442,40 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
         Layout::vertical([
             Constraint::Length(0),
             Constraint::Length(0),
-            Constraint::Min(11),
-            Constraint::Length(3),
+            Constraint::Min(15),
+            Constraint::Length(0),
         ])
         .split(body[1])
     } else {
         Layout::vertical([
-            Constraint::Length(9),
-            Constraint::Length(5),
-            Constraint::Min(9),
+            Constraint::Length(14),
+            Constraint::Length(0),
+            Constraint::Min(17),
             Constraint::Length(3),
         ])
         .split(body[1])
     };
+    let top = if compact {
+        vec![Rect::default(), Rect::default()]
+    } else {
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(preview[0])
+            .to_vec()
+    };
     if !compact {
-        let thumb_title = format!(" Preview  {}  ·  [v] cinema view ", app.thumbnail_renderer);
+        let thumb_title = format!(
+            " Artwork  ·  [v] HD via viu  ·  {} ",
+            app.thumbnail_renderer
+        );
         let thumb_block = panel(&thumb_title);
-        let thumb_inner = thumb_block.inner(preview[0]);
-        frame.render_widget(thumb_block, preview[0]);
+        let thumb_inner = thumb_block.inner(top[0]);
+        frame.render_widget(thumb_block, top[0]);
         if let Some(protocol) = app.thumbnail.as_mut() {
-            frame.render_stateful_widget(StatefulImage::default(), thumb_inner, protocol);
+            frame.render_stateful_widget(
+                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3))),
+                thumb_inner,
+                protocol,
+            );
         } else {
             frame.render_widget(
                 Paragraph::new(app.thumbnail_status.clone())
@@ -497,69 +522,39 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
                 .style(Style::default().fg(TEXT))
                 .block(panel(" Now selected "))
                 .wrap(Wrap { trim: true }),
-            preview[1],
+            top[1],
         );
     }
 
-    let tune = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Min(2),
-    ])
-    .split(preview[2]);
-    let player = Layout::horizontal([
-        Constraint::Min(18),
-        Constraint::Length(13),
-        Constraint::Length(10),
-    ])
-    .split(tune[0]);
-    let player_status = match app.playback_state {
-        PlaybackState::Stopped => "♫  Audio preview ready",
-        PlaybackState::Loading => "◌  Connecting to stream…",
-        PlaybackState::Playing => "▶  Playing selected audio",
-        PlaybackState::Paused => "Ⅱ  Audio preview paused",
+    let tune = if compact {
+        Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(0),
+        ])
+        .split(preview[2])
+    } else {
+        Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(2),
+        ])
+        .split(preview[2])
     };
-    frame.render_widget(
-        Paragraph::new(player_status)
-            .style(Style::default().fg(match app.playback_state {
-                PlaybackState::Playing => GREEN,
-                PlaybackState::Loading => ORANGE,
-                PlaybackState::Paused => CYAN,
-                PlaybackState::Stopped => MUTED,
-            }))
-            .block(panel(" Listen first ")),
-        player[0],
-    );
-    button(
-        frame,
-        player[1],
-        if app.playback_state == PlaybackState::Paused {
-            "Resume"
-        } else if app.playback_state == PlaybackState::Playing {
-            "Pause"
-        } else {
-            "Play"
-        },
-        "p",
-        GREEN,
-    );
-    button(frame, player[2], "Stop", "x", RED);
-    app.hits.push(Hit {
-        rect: player[1],
-        action: ClickAction::TogglePlayback,
-    });
-    app.hits.push(Hit {
-        rect: player[2],
-        action: ClickAction::StopPlayback,
-    });
+    media_player(frame, app, tune[0], tune[1], tune[2]);
 
     let video_choices = app.search_video_choices.clone();
     let audio_choices = app.search_audio_choices.clone();
     quality_slider(
         frame,
         app,
-        tune[1],
+        tune[3],
         "Video  [ / ]",
         &video_choices,
         app.search_video_index,
@@ -568,7 +563,7 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
     quality_slider(
         frame,
         app,
-        tune[2],
+        tune[4],
         "Audio  { / }",
         &audio_choices,
         app.search_audio_index,
@@ -589,17 +584,19 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
     let subtitle_color = if app.search_subtitles { GREEN } else { MUTED };
-    frame.render_widget(
-        Paragraph::new(subtitles)
-            .style(Style::default().fg(subtitle_color))
-            .block(panel(" Captions  [t] toggle "))
-            .wrap(Wrap { trim: true }),
-        tune[3],
-    );
-    app.hits.push(Hit {
-        rect: tune[3],
-        action: ClickAction::ToggleSearchSubtitles,
-    });
+    if !compact {
+        frame.render_widget(
+            Paragraph::new(subtitles)
+                .style(Style::default().fg(subtitle_color))
+                .block(panel(" Captions  [t] toggle "))
+                .wrap(Wrap { trim: true }),
+            tune[5],
+        );
+        app.hits.push(Hit {
+            rect: tune[5],
+            action: ClickAction::ToggleSearchSubtitles,
+        });
+    }
 
     let actions = Layout::horizontal([
         Constraint::Percentage(25),
@@ -607,21 +604,178 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Percentage(37),
     ])
     .split(preview[3]);
-    button(frame, actions[0], "View", "v", CYAN);
-    button(frame, actions[1], "Customize", "Enter", GREEN);
-    button(frame, actions[2], "Download", "a", ORANGE);
-    app.hits.push(Hit {
-        rect: actions[0],
-        action: ClickAction::ViewSearchThumbnail,
-    });
-    app.hits.push(Hit {
-        rect: actions[1],
-        action: ClickAction::UseSearchResult,
-    });
-    app.hits.push(Hit {
-        rect: actions[2],
-        action: ClickAction::QueueSearchResult,
-    });
+    if !compact {
+        button(frame, actions[0], "View", "v", CYAN);
+        button(frame, actions[1], "Customize", "Enter", GREEN);
+        button(frame, actions[2], "Download", "a", ORANGE);
+        app.hits.push(Hit {
+            rect: actions[0],
+            action: ClickAction::ViewSearchThumbnail,
+        });
+        app.hits.push(Hit {
+            rect: actions[1],
+            action: ClickAction::UseSearchResult,
+        });
+        app.hits.push(Hit {
+            rect: actions[2],
+            action: ClickAction::QueueSearchResult,
+        });
+    }
+}
+
+fn media_player(
+    frame: &mut Frame,
+    app: &mut App,
+    transport_area: Rect,
+    timeline_area: Rect,
+    sound_area: Rect,
+) {
+    let transport = Layout::horizontal([
+        Constraint::Min(16),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(10),
+    ])
+    .split(transport_area);
+    let mode = if app.playback_mode == PlayerMode::Video {
+        "video"
+    } else {
+        "audio"
+    };
+    let player_status = match app.playback_state {
+        PlaybackState::Stopped => "Ready · choose audio or video",
+        PlaybackState::Loading => "◌  Connecting full stream…",
+        PlaybackState::Playing => {
+            if app.playback_mode == PlayerMode::Video {
+                "▶  Playing video in mpv"
+            } else {
+                "▶  Playing complete audio"
+            }
+        }
+        PlaybackState::Paused => "Ⅱ  Paused · Space resumes",
+    };
+    frame.render_widget(
+        Paragraph::new(player_status)
+            .style(Style::default().fg(match app.playback_state {
+                PlaybackState::Playing => GREEN,
+                PlaybackState::Loading => ORANGE,
+                PlaybackState::Paused => CYAN,
+                PlaybackState::Stopped => MUTED,
+            }))
+            .block(panel(&format!(" Player  {mode}  ·  [Space] play/pause "))),
+        transport[0],
+    );
+    button(frame, transport[1], "Audio", "p", GREEN);
+    button(frame, transport[2], "Video", "P", CYAN);
+    button(frame, transport[3], "Stop", "x", RED);
+    app.hits.extend([
+        Hit {
+            rect: transport[0],
+            action: ClickAction::TogglePlayback,
+        },
+        Hit {
+            rect: transport[1],
+            action: ClickAction::PlayAudio,
+        },
+        Hit {
+            rect: transport[2],
+            action: ClickAction::PlayVideo,
+        },
+        Hit {
+            rect: transport[3],
+            action: ClickAction::StopPlayback,
+        },
+    ]);
+
+    let timeline_block = panel(" Timeline  ·  [←/→] 5s  ·  [Shift] 30s ");
+    let timeline_inner = timeline_block.inner(timeline_area);
+    let ratio = if app.playback_duration > 0.0 {
+        (app.playback_position / app.playback_duration).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let elapsed = clock(app.playback_position);
+    let total = if app.playback_duration > 0.0 {
+        clock(app.playback_duration)
+    } else {
+        "--:--".into()
+    };
+    frame.render_widget(
+        Gauge::default()
+            .block(timeline_block)
+            .gauge_style(Style::default().fg(CYAN).bg(PANEL_2))
+            .ratio(ratio)
+            .label(format!("{elapsed} / {total}")),
+        timeline_area,
+    );
+    for column in 0..timeline_inner.width {
+        let permille = if timeline_inner.width <= 1 {
+            0
+        } else {
+            column.saturating_mul(1000) / (timeline_inner.width - 1)
+        };
+        app.hits.push(Hit {
+            rect: Rect::new(timeline_inner.x + column, timeline_inner.y, 1, 1),
+            action: ClickAction::SeekPlayback(permille),
+        });
+    }
+
+    let sound = Layout::horizontal([
+        Constraint::Min(18),
+        Constraint::Length(12),
+        Constraint::Length(11),
+        Constraint::Length(11),
+    ])
+    .split(sound_area);
+    let volume_title = format!(
+        " Volume  [-/+]  ·  {}  ·  {:.1}× ",
+        if app.playback_muted { "muted" } else { "live" },
+        app.playback_speed
+    );
+    let volume_block = panel(&volume_title);
+    let volume_inner = volume_block.inner(sound[0]);
+    frame.render_widget(
+        Gauge::default()
+            .block(volume_block)
+            .gauge_style(Style::default().fg(GREEN).bg(PANEL_2))
+            .ratio((app.playback_volume / 100.0).clamp(0.0, 1.0))
+            .label(format!("{:.0}%", app.playback_volume)),
+        sound[0],
+    );
+    for column in 0..volume_inner.width {
+        let volume = if volume_inner.width <= 1 {
+            0
+        } else {
+            column.saturating_mul(100) / (volume_inner.width - 1)
+        };
+        app.hits.push(Hit {
+            rect: Rect::new(volume_inner.x + column, volume_inner.y, 1, 1),
+            action: ClickAction::SetPlaybackVolume(volume as u8),
+        });
+    }
+    button(
+        frame,
+        sound[1],
+        if app.playback_muted { "Unmute" } else { "Mute" },
+        "m",
+        ORANGE,
+    );
+    button(frame, sound[2], "Slow", ",", CYAN);
+    button(frame, sound[3], "Fast", ".", CYAN);
+    app.hits.extend([
+        Hit {
+            rect: sound[1],
+            action: ClickAction::TogglePlaybackMute,
+        },
+        Hit {
+            rect: sound[2],
+            action: ClickAction::AdjustPlaybackSpeed(false),
+        },
+        Hit {
+            rect: sound[3],
+            action: ClickAction::AdjustPlaybackSpeed(true),
+        },
+    ]);
 }
 
 fn quality_slider(
@@ -955,7 +1109,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(name, Style::default().fg(TEXT)),
         ]));
     }
-    lines.extend([Line::raw(""), Line::styled("Performance", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)), Line::styled("Native fragments are the reliable default. aria2 can be faster on some direct transfers, but is optional.", Style::default().fg(MUTED)), Line::raw(""), Line::styled("Privacy", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)), Line::styled("Cookie and proxy values are passed directly to yt-dlp and never logged by Tide.", Style::default().fg(MUTED))]);
+    lines.extend([Line::raw(""), Line::styled("Performance", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)), Line::styled("Native fragments are the reliable default. aria2 can be faster on some direct transfers, but is optional.", Style::default().fg(MUTED)), Line::raw(""), Line::styled("Privacy", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)), Line::styled("Cookie and proxy values are passed directly to yt-dlp and never logged by youTUIbe.", Style::default().fg(MUTED))]);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -1039,8 +1193,11 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
         kv("[ / ]", "lower / raise video quality"),
         kv("{ / }", "lower / raise audio quality"),
         kv("t", "toggle available subtitles"),
-        kv("p / Space", "play or pause audio preview"),
-        kv("x", "stop audio preview"),
+        kv("p / P", "play complete audio / video"),
+        kv("Space / x", "pause or resume / stop"),
+        kv("← / →", "seek 5s (Shift: 30s)"),
+        kv("- / + / m", "volume down / up / mute"),
+        kv(", / . / 0", "speed down / up / reset"),
         Line::raw(""),
         heading("Queue & history"),
         kv("p", "pause / resume process"),
@@ -1078,7 +1235,7 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(
         Paragraph::new(notes)
-            .block(panel(" How Tide behaves "))
+            .block(panel(" How youTUIbe behaves "))
             .wrap(Wrap { trim: true }),
         cols[1],
     );
@@ -1258,6 +1415,20 @@ fn duration(v: Option<f64>) -> String {
         "unknown duration".into()
     } else {
         format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    }
+}
+
+fn clock(value: f64) -> String {
+    let seconds = value.max(0.0) as u64;
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            (seconds % 3600) / 60,
+            seconds % 60
+        )
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 }
 

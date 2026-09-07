@@ -1,4 +1,8 @@
 /target/
+/dist/
+/packaging/aur/*/src/
+/packaging/aur/*/pkg/
+*.pkg.tar.*
 *.part
 *.ytdl
 .DS_Store

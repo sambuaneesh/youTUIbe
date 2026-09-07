@@ -1327,6 +1327,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "md5"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2621,31 +2627,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tide-dlp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "directories",
- "futures",
- "image",
- "libc",
- "ratatui",
- "ratatui-image",
- "reqwest",
- "serde",
- "serde_json",
- "shell-words",
- "tempfile",
- "tokio",
- "unicode-width",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "time"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3386,6 +3367,33 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
+]
+
+[[package]]
+name = "youtuibe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "directories",
+ "futures",
+ "image",
+ "libc",
+ "md5",
+ "png",
+ "ratatui",
+ "ratatui-image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tempfile",
+ "tokio",
+ "unicode-width",
+ "url",
+ "uuid",
 ]
 
 [[package]]

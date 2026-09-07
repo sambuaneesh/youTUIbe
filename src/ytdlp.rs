@@ -2,14 +2,15 @@ use crate::model::{DownloadOptions, Job, MediaMode, Quality, Settings};
 use serde::Deserialize;
 use std::{collections::BTreeMap, path::Path, process::Stdio};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
     process::Command,
     sync::mpsc,
 };
 use uuid::Uuid;
 
-const PROGRESS_PREFIX: &str = "__TIDE_PROGRESS__\t";
-const DONE_PREFIX: &str = "__TIDE_DONE__\t";
+const PROGRESS_PREFIX: &str = "__YOUTUIBE_PROGRESS__\t";
+const DONE_PREFIX: &str = "__YOUTUIBE_DONE__\t";
 
 #[derive(Debug, Clone)]
 pub enum Control {
@@ -23,6 +24,40 @@ pub enum PlayerControl {
     Pause,
     Resume,
     Stop,
+    SeekRelative(f64),
+    SeekPercent(f64),
+    SetVolume(f64),
+    ToggleMute,
+    SetSpeed(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerMode {
+    Audio,
+    Video,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlayerStatus {
+    pub position: f64,
+    pub duration: f64,
+    pub volume: f64,
+    pub speed: f64,
+    pub paused: bool,
+    pub muted: bool,
+}
+
+impl Default for PlayerStatus {
+    fn default() -> Self {
+        Self {
+            position: 0.0,
+            duration: 0.0,
+            volume: 100.0,
+            speed: 1.0,
+            paused: false,
+            muted: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +104,10 @@ pub enum EngineEvent {
         result: Result<ThumbnailData, String>,
     },
     PlayerStarted(u64),
+    PlayerStatus {
+        token: u64,
+        status: PlayerStatus,
+    },
     PlayerFinished {
         token: u64,
         error: String,
@@ -569,23 +608,31 @@ async fn fetch_video_info(url: String, settings: Settings) -> Result<VideoInfo, 
 pub fn start_player(
     url: String,
     format: String,
+    mode: PlayerMode,
     token: u64,
     tx: mpsc::UnboundedSender<EngineEvent>,
 ) -> mpsc::UnboundedSender<PlayerControl> {
     let (control_tx, control_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run_player(url, format, token, tx, control_rx));
+    tokio::spawn(run_player(url, format, mode, token, tx, control_rx));
     control_tx
 }
 
 async fn run_player(
     url: String,
     format: String,
+    mode: PlayerMode,
     token: u64,
     tx: mpsc::UnboundedSender<EngineEvent>,
     mut controls: mpsc::UnboundedReceiver<PlayerControl>,
 ) {
+    let socket_path =
+        std::env::temp_dir().join(format!("youtuibe-mpv-{}-{token}.sock", std::process::id()));
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+    let socket_arg = format!("--input-ipc-server={}", socket_path.display());
     let mut command = Command::new("mpv");
-    command.args(player_args(&url, &format));
+    command.args(player_args(&url, &format, mode, &socket_arg));
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -607,8 +654,87 @@ async fn run_player(
         }
     };
     let pid = child.id();
+    let mut connect_attempts = 0_u16;
+    let stream = loop {
+        match UnixStream::connect(&socket_path).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let _ = std::fs::remove_file(&socket_path);
+                        let _ = tx.send(EngineEvent::PlayerFinished {
+                            token,
+                            error: format!("mpv exited with {status}: {error}"),
+                        });
+                        return;
+                    }
+                    Err(wait_error) => {
+                        let _ = tx.send(EngineEvent::PlayerFinished {
+                            token,
+                            error: format!("Could not connect to mpv: {wait_error}"),
+                        });
+                        return;
+                    }
+                    Ok(None) => {}
+                }
+                match controls.try_recv() {
+                    Ok(PlayerControl::Stop)
+                    | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        kill_player_group(pid);
+                        let _ = child.wait().await;
+                        let _ = std::fs::remove_file(&socket_path);
+                        let _ = tx.send(EngineEvent::PlayerFinished {
+                            token,
+                            error: String::new(),
+                        });
+                        return;
+                    }
+                    Ok(_) | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                }
+                connect_attempts += 1;
+                if connect_attempts >= 100 {
+                    kill_player_group(pid);
+                    let _ = child.wait().await;
+                    let _ = std::fs::remove_file(&socket_path);
+                    let _ = tx.send(EngineEvent::PlayerFinished {
+                        token,
+                        error: format!("mpv control socket did not become ready: {error}"),
+                    });
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    for (id, property) in ["time-pos", "duration", "volume", "speed", "pause", "mute"]
+        .iter()
+        .enumerate()
+    {
+        if send_player_command(
+            &mut writer,
+            serde_json::json!({
+                "command": ["observe_property", id + 1, property]
+            }),
+        )
+        .await
+        .is_err()
+        {
+            kill_player_group(pid);
+            let _ = child.wait().await;
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = tx.send(EngineEvent::PlayerFinished {
+                token,
+                error: "Could not initialize mpv controls".into(),
+            });
+            return;
+        }
+    }
     let _ = tx.send(EngineEvent::PlayerStarted(token));
+    let mut player_status = PlayerStatus::default();
     let mut stopped = false;
+    let mut ipc_open = true;
     loop {
         tokio::select! {
             status = child.wait() => {
@@ -617,41 +743,112 @@ async fn run_player(
                     Ok(status) => format!("mpv exited with {status}"),
                     Err(error) => format!("Could not wait for mpv: {error}"),
                 };
+                let _ = std::fs::remove_file(&socket_path);
                 let _ = tx.send(EngineEvent::PlayerFinished { token, error });
                 return;
             }
             control = controls.recv() => match control {
                 Some(PlayerControl::Pause) => {
-                    #[cfg(unix)]
-                    if let Some(pid) = pid { unsafe { libc::kill(-(pid as i32), libc::SIGSTOP); } }
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["set_property", "pause", true]})).await;
                 }
                 Some(PlayerControl::Resume) => {
-                    #[cfg(unix)]
-                    if let Some(pid) = pid { unsafe { libc::kill(-(pid as i32), libc::SIGCONT); } }
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["set_property", "pause", false]})).await;
                 }
                 Some(PlayerControl::Stop) | None => {
                     stopped = true;
-                    #[cfg(unix)]
-                    if let Some(pid) = pid { unsafe { libc::kill(-(pid as i32), libc::SIGKILL); } }
-                    #[cfg(not(unix))]
-                    let _ = child.kill().await;
+                    kill_player_group(pid);
                 }
+                Some(PlayerControl::SeekRelative(seconds)) => {
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["seek", seconds, "relative+exact"]})).await;
+                }
+                Some(PlayerControl::SeekPercent(percent)) => {
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["seek", percent.clamp(0.0, 100.0), "absolute-percent+exact"]})).await;
+                }
+                Some(PlayerControl::SetVolume(volume)) => {
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["set_property", "volume", volume.clamp(0.0, 100.0)]})).await;
+                }
+                Some(PlayerControl::ToggleMute) => {
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["cycle", "mute"]})).await;
+                }
+                Some(PlayerControl::SetSpeed(speed)) => {
+                    let _ = send_player_command(&mut writer, serde_json::json!({"command": ["set_property", "speed", speed.clamp(0.25, 3.0)]})).await;
+                }
+            },
+            line = lines.next_line(), if ipc_open => match line {
+                Ok(Some(line)) => {
+                    if update_player_status(&line, &mut player_status) {
+                        let _ = tx.send(EngineEvent::PlayerStatus {
+                            token,
+                            status: player_status.clone(),
+                        });
+                    }
+                }
+                Ok(None) | Err(_) => ipc_open = false,
             }
         }
     }
 }
 
-fn player_args(url: &str, format: &str) -> Vec<String> {
-    vec![
-        "--no-video".into(),
-        "--force-window=no".into(),
+fn player_args(url: &str, format: &str, mode: PlayerMode, socket_arg: &str) -> Vec<String> {
+    let mut args = vec![
+        "--no-config".into(),
         "--really-quiet".into(),
         "--no-terminal".into(),
         "--ytdl=yes".into(),
         format!("--ytdl-format={format}"),
-        "--".into(),
-        url.into(),
-    ]
+        socket_arg.into(),
+    ];
+    match mode {
+        PlayerMode::Audio => {
+            args.push("--no-video".into());
+            args.push("--force-window=no".into());
+        }
+        PlayerMode::Video => {
+            args.push("--force-window=yes".into());
+        }
+    }
+    args.extend(["--".into(), url.into()]);
+    args
+}
+
+async fn send_player_command(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    command: serde_json::Value,
+) -> std::io::Result<()> {
+    writer.write_all(command.to_string().as_bytes()).await?;
+    writer.write_all(b"\n").await
+}
+
+fn update_player_status(line: &str, status: &mut PlayerStatus) -> bool {
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if message.get("event").and_then(|value| value.as_str()) != Some("property-change") {
+        return false;
+    }
+    let Some(name) = message.get("name").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    let data = &message["data"];
+    match name {
+        "time-pos" => status.position = data.as_f64().unwrap_or(status.position),
+        "duration" => status.duration = data.as_f64().unwrap_or(status.duration),
+        "volume" => status.volume = data.as_f64().unwrap_or(status.volume),
+        "speed" => status.speed = data.as_f64().unwrap_or(status.speed),
+        "pause" => status.paused = data.as_bool().unwrap_or(status.paused),
+        "mute" => status.muted = data.as_bool().unwrap_or(status.muted),
+        _ => return false,
+    }
+    true
+}
+
+fn kill_player_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
 }
 
 pub async fn search(
@@ -751,7 +948,7 @@ pub async fn fetch_thumbnail(url: String, token: u64, tx: mpsc::UnboundedSender<
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Tide/0.1 thumbnail preview")
+            .user_agent("youTUIbe/0.1 thumbnail preview")
             .build()
             .map_err(|e| format!("thumbnail client: {e}"))?;
         let response = client
@@ -1024,11 +1221,81 @@ mod tests {
 
     #[test]
     fn mpv_format_is_passed_as_a_single_option() {
-        let args = player_args("https://example.test/video", "251");
+        let args = player_args(
+            "https://example.test/video",
+            "251",
+            PlayerMode::Audio,
+            "--input-ipc-server=/tmp/test.sock",
+        );
         assert!(args.contains(&"--ytdl-format=251".into()));
         assert!(!args.contains(&"--ytdl-format".into()));
+        assert!(args.contains(&"--no-video".into()));
+        assert!(args.contains(&"--input-ipc-server=/tmp/test.sock".into()));
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "https://example.test/video");
+    }
+
+    #[test]
+    fn video_player_keeps_video_and_uses_ipc() {
+        let args = player_args(
+            "https://example.test/video",
+            "137+251/137",
+            PlayerMode::Video,
+            "--input-ipc-server=/tmp/test.sock",
+        );
+        assert!(!args.contains(&"--no-video".into()));
+        assert!(args.contains(&"--force-window=yes".into()));
+        assert!(args.contains(&"--ytdl-format=137+251/137".into()));
+    }
+
+    #[test]
+    fn player_property_events_update_status() {
+        let mut status = PlayerStatus::default();
+        assert!(update_player_status(
+            r#"{"event":"property-change","name":"time-pos","data":42.5}"#,
+            &mut status
+        ));
+        assert!(update_player_status(
+            r#"{"event":"property-change","name":"duration","data":180.0}"#,
+            &mut status
+        ));
+        assert!(update_player_status(
+            r#"{"event":"property-change","name":"pause","data":true}"#,
+            &mut status
+        ));
+        assert_eq!(status.position, 42.5);
+        assert_eq!(status.duration, 180.0);
+        assert!(status.paused);
+    }
+
+    #[test]
+    fn flac_audio_keeps_cover_art_flags() {
+        let options = DownloadOptions {
+            mode: MediaMode::Audio,
+            quality: Quality::Custom("251".into()),
+            audio_format: "flac".into(),
+            ..Default::default()
+        };
+        let args = build_args(&options, &Settings::default(), "https://x.test").unwrap();
+        assert!(args.windows(2).any(|w| w == ["--audio-format", "flac"]));
+        assert!(args.contains(&"--embed-thumbnail".into()));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--convert-thumbnails", "jpg"])
+        );
+    }
+
+    #[test]
+    fn best_audio_is_not_inflated_to_flac() {
+        let options = DownloadOptions {
+            mode: MediaMode::Audio,
+            audio_format: "best".into(),
+            ..Default::default()
+        };
+        let args = build_args(&options, &Settings::default(), "https://x.test").unwrap();
+        assert!(args.windows(2).any(|w| w == ["--audio-format", "best"]));
+        assert!(!args.windows(2).any(|w| w == ["--audio-format", "flac"]));
+        assert!(args.contains(&"--embed-thumbnail".into()));
     }
 
     #[test]
@@ -1085,7 +1352,7 @@ mod tests {
         let fake = temp.path().join("fake-yt-dlp");
         std::fs::write(
             &fake,
-            "#!/bin/sh\nprintf '__TIDE_PROGRESS__\\tdownloading\\t50\\t100\\t25\\t2\\tFixture\\n'\nprintf '__TIDE_DONE__\\t/tmp/fixture.mp4\\n'\n",
+            "#!/bin/sh\nprintf '__YOUTUIBE_PROGRESS__\\tdownloading\\t50\\t100\\t25\\t2\\tFixture\\n'\nprintf '__YOUTUIBE_DONE__\\t/tmp/fixture.mp4\\n'\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();

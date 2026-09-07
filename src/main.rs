@@ -2,6 +2,7 @@ mod app;
 mod display;
 mod model;
 mod storage;
+mod thumbnail_cache;
 mod ui;
 mod ytdlp;
 
@@ -35,7 +36,7 @@ use tokio::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "tide",
+    name = "youtuibe",
     version,
     about = "Resilient Ratatui command center for yt-dlp"
 )]
@@ -57,7 +58,7 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        anyhow::bail!("Tide needs an interactive terminal (TTY)");
+        anyhow::bail!("youTUIbe needs an interactive terminal (TTY)");
     }
     let state_path = cli.state.unwrap_or_else(storage::state_path);
     let mut state = storage::load(&state_path).unwrap_or_else(|e| {
@@ -65,15 +66,33 @@ async fn main() -> Result<()> {
         model::PersistedState::default()
     });
     if let Some(path) = cli.output {
-        let old_default_archive = state.settings.output_dir.join(".tide-archive.txt");
+        let old_default_archive = state.settings.output_dir.join(".youtuibe-archive.txt");
         if state.settings.archive_path == old_default_archive {
-            state.settings.archive_path = path.join(".tide-archive.txt");
+            state.settings.archive_path = path.join(".youtuibe-archive.txt");
         }
         state.settings.output_dir = path;
     }
     let help_text = load_help(&state.settings.yt_dlp_path).await;
     let mut app = App::new(state_path, state, help_text);
     app.url = cli.urls.join(" ");
+    if let Err(error) = thumbnail_cache::ensure_registration() {
+        app.notice = format!("Desktop artwork integration unavailable: {error}");
+    }
+    let artwork_paths = app
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.status == model::DownloadStatus::Completed
+                && job.options.mode == model::MediaMode::Audio
+                && !job.output_path.is_empty()
+        })
+        .map(|job| PathBuf::from(&job.output_path))
+        .collect::<Vec<_>>();
+    tokio::spawn(async move {
+        for path in artwork_paths {
+            let _ = thumbnail_cache::generate(path).await;
+        }
+    });
 
     let old_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -202,7 +221,7 @@ async fn show_viu_preview(
         io::stdout(),
         MoveTo(0, area.height.saturating_sub(1)),
         Clear(ClearType::CurrentLine),
-        Print("Press any key or click to return to Tide")
+        Print("Press any key or click to return to youTUIbe")
     )
     .map_err(|error| format!("draw preview prompt: {error}"))?;
     Ok(())

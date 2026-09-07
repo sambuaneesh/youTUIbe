@@ -141,7 +141,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         let output_dir = dirs_download().unwrap_or_else(|| PathBuf::from("downloads"));
-        let archive_path = output_dir.join(".tide-archive.txt");
+        let archive_path = output_dir.join(".youtuibe-archive.txt");
         Self {
             output_dir,
             output_template: "%(uploader|Unknown)s/%(title)s [%(id)s].%(ext)s".into(),

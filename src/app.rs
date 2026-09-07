@@ -4,8 +4,11 @@ use crate::{
         DownloadOptions, DownloadStatus, Job, MediaMode, PersistedState, Preset, Quality, Settings,
         presets,
     },
-    storage,
-    ytdlp::{self, Control, EngineEvent, PlayerControl, SearchResult, VideoInfo},
+    storage, thumbnail_cache,
+    ytdlp::{
+        self, Control, EngineEvent, PlayerControl, PlayerMode, PlayerStatus, SearchResult,
+        VideoInfo,
+    },
 };
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -91,7 +94,13 @@ pub enum ClickAction {
     SearchAudioQuality(usize),
     ToggleSearchSubtitles,
     TogglePlayback,
+    PlayAudio,
+    PlayVideo,
     StopPlayback,
+    SeekPlayback(u16),
+    SetPlaybackVolume(u8),
+    TogglePlaybackMute,
+    AdjustPlaybackSpeed(bool),
     Preset(usize),
     Builder(usize),
     Queue(usize),
@@ -154,7 +163,13 @@ pub struct App {
     pub search_audio_index: usize,
     pub search_subtitles: bool,
     pub playback_state: PlaybackState,
+    pub playback_mode: PlayerMode,
     pub playback_title: String,
+    pub playback_position: f64,
+    pub playback_duration: f64,
+    pub playback_volume: f64,
+    pub playback_speed: f64,
+    pub playback_muted: bool,
     pub builder_index: usize,
     pub queue_index: usize,
     pub history_index: usize,
@@ -245,7 +260,13 @@ impl App {
             search_audio_index: 0,
             search_subtitles: false,
             playback_state: PlaybackState::Stopped,
+            playback_mode: PlayerMode::Audio,
             playback_title: String::new(),
+            playback_position: 0.0,
+            playback_duration: 0.0,
+            playback_volume: 100.0,
+            playback_speed: 1.0,
+            playback_muted: false,
             builder_index: 0,
             queue_index: 0,
             history_index: 0,
@@ -351,8 +372,18 @@ impl App {
                 }
             }
             EngineEvent::Output { id, path } => {
+                let audio_only = self
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .is_some_and(|job| job.options.mode == MediaMode::Audio);
                 if let Some(j) = self.job_mut(id) {
-                    j.output_path = path;
+                    j.output_path = path.clone();
+                }
+                if audio_only {
+                    tokio::spawn(async move {
+                        let _ = thumbnail_cache::generate(PathBuf::from(path)).await;
+                    });
                 }
             }
             EngineEvent::Log { id, line } => {
@@ -403,7 +434,7 @@ impl App {
                     };
                     tokio::spawn(async move {
                         let _ = tokio::process::Command::new("notify-send")
-                            .args(["Tide", &format!("{message}: {finished_title}")])
+                            .args(["youTUIbe", &format!("{message}: {finished_title}")])
                             .status()
                             .await;
                     });
@@ -431,6 +462,12 @@ impl App {
                     Ok(results) => {
                         self.search_results = results;
                         self.search_index = 0;
+                        self.playback_position = 0.0;
+                        self.playback_duration = self
+                            .search_results
+                            .first()
+                            .and_then(|result| result.duration)
+                            .unwrap_or(0.0);
                         self.search_error.clear();
                         self.notice = if self.search_results.is_empty() {
                             "Search completed with no results; downloads remain available".into()
@@ -509,16 +546,29 @@ impl App {
             EngineEvent::ThumbnailReady { .. } => {}
             EngineEvent::PlayerStarted(token) if token == self.player_token => {
                 self.playback_state = PlaybackState::Playing;
-                self.notice = format!("Now playing audio: {}", self.playback_title);
+                self.notice = format!(
+                    "Now playing {}: {}",
+                    if self.playback_mode == PlayerMode::Video {
+                        "video"
+                    } else {
+                        "audio"
+                    },
+                    self.playback_title
+                );
             }
             EngineEvent::PlayerStarted(_) => {}
+            EngineEvent::PlayerStatus { token, status } if token == self.player_token => {
+                self.apply_player_status(status);
+            }
+            EngineEvent::PlayerStatus { .. } => {}
             EngineEvent::PlayerFinished { token, error } if token == self.player_token => {
                 self.player_controller = None;
                 self.playback_state = PlaybackState::Stopped;
+                self.playback_position = 0.0;
                 self.notice = if error.is_empty() {
-                    "Audio preview stopped".into()
+                    "Playback stopped".into()
                 } else {
-                    format!("Audio preview unavailable: {}", compact_error(&error))
+                    format!("Playback unavailable: {}", compact_error(&error))
                 };
             }
             EngineEvent::PlayerFinished { .. } => {}
@@ -783,8 +833,30 @@ impl App {
             KeyCode::Char('{') => self.adjust_search_audio(false),
             KeyCode::Char('}') => self.adjust_search_audio(true),
             KeyCode::Char('t') => self.toggle_search_subtitles(),
-            KeyCode::Char('p') | KeyCode::Char(' ') => self.toggle_audio_preview(),
-            KeyCode::Char('x') => self.stop_audio_preview(),
+            KeyCode::Char('p') => self.play_audio(),
+            KeyCode::Char('P') => self.play_video(),
+            KeyCode::Char(' ') => self.toggle_playback(),
+            KeyCode::Char('x') => self.stop_playback(),
+            KeyCode::Left => {
+                self.seek_playback_relative(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    -30.0
+                } else {
+                    -5.0
+                })
+            }
+            KeyCode::Right => {
+                self.seek_playback_relative(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    30.0
+                } else {
+                    5.0
+                })
+            }
+            KeyCode::Char('-') => self.adjust_playback_volume(-5.0),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_playback_volume(5.0),
+            KeyCode::Char('m') => self.toggle_playback_mute(),
+            KeyCode::Char(',') => self.adjust_playback_speed(-0.1),
+            KeyCode::Char('.') => self.adjust_playback_speed(0.1),
+            KeyCode::Char('0') => self.reset_playback_speed(),
             _ => {}
         }
     }
@@ -929,7 +1001,8 @@ impl App {
     pub fn select_search(&mut self, index: usize) {
         if index < self.search_results.len() {
             self.search_index = index;
-            self.stop_audio_preview();
+            self.stop_playback();
+            self.playback_duration = self.search_results[index].duration.unwrap_or(0.0);
             self.load_selected_thumbnail();
             self.load_selected_details();
         }
@@ -1207,58 +1280,187 @@ impl App {
         }
     }
 
-    pub fn toggle_audio_preview(&mut self) {
+    fn apply_player_status(&mut self, status: PlayerStatus) {
+        self.playback_position = status.position.max(0.0);
+        self.playback_duration = status.duration.max(0.0);
+        self.playback_volume = status.volume.clamp(0.0, 100.0);
+        self.playback_speed = status.speed.clamp(0.25, 3.0);
+        self.playback_muted = status.muted;
+        if self.playback_state != PlaybackState::Loading {
+            self.playback_state = if status.paused {
+                PlaybackState::Paused
+            } else {
+                PlaybackState::Playing
+            };
+        }
+    }
+
+    pub fn toggle_playback(&mut self) {
         match self.playback_state {
             PlaybackState::Playing => {
                 if let Some(controller) = &self.player_controller {
                     let _ = controller.send(PlayerControl::Pause);
                     self.playback_state = PlaybackState::Paused;
-                    self.notice = "Audio preview paused".into();
+                    self.notice = "Playback paused".into();
                 }
             }
             PlaybackState::Paused => {
                 if let Some(controller) = &self.player_controller {
                     let _ = controller.send(PlayerControl::Resume);
                     self.playback_state = PlaybackState::Playing;
-                    self.notice = format!("Now playing audio: {}", self.playback_title);
+                    self.notice = format!("Playback resumed: {}", self.playback_title);
                 }
             }
             PlaybackState::Loading => {
-                self.notice = "Audio preview is still connecting…".into();
+                self.notice = "The player is still connecting…".into();
             }
-            PlaybackState::Stopped => {
-                if !ytdlp::executable_exists("mpv") {
-                    self.notice = "Audio preview needs the optional mpv executable".into();
-                    return;
-                }
-                let Some(result) = self.search_results.get(self.search_index) else {
-                    return;
-                };
-                let format = self
-                    .search_audio_choices
-                    .get(self.search_audio_index)
-                    .map(|choice| choice.format_id.clone())
-                    .filter(|id| !id.is_empty())
-                    .unwrap_or_else(|| "bestaudio/best".into());
-                self.player_token = self.player_token.wrapping_add(1);
-                self.playback_title = result.title.clone();
-                self.playback_state = PlaybackState::Loading;
-                self.player_controller = Some(ytdlp::start_player(
-                    result.url.clone(),
-                    format,
-                    self.player_token,
-                    self.event_tx.clone(),
-                ));
-                self.notice = format!("Connecting audio preview: {}", result.title);
-            }
+            PlaybackState::Stopped => self.start_playback(self.playback_mode),
         }
     }
 
-    pub fn stop_audio_preview(&mut self) {
+    pub fn play_audio(&mut self) {
+        if self.playback_state != PlaybackState::Stopped && self.playback_mode == PlayerMode::Audio
+        {
+            self.toggle_playback();
+        } else {
+            self.start_playback(PlayerMode::Audio);
+        }
+    }
+
+    pub fn play_video(&mut self) {
+        if self.playback_state != PlaybackState::Stopped && self.playback_mode == PlayerMode::Video
+        {
+            self.toggle_playback();
+        } else {
+            self.start_playback(PlayerMode::Video);
+        }
+    }
+
+    fn start_playback(&mut self, mode: PlayerMode) {
+        if !ytdlp::executable_exists("mpv") {
+            self.notice = "Playback needs the optional mpv executable".into();
+            return;
+        }
+        let Some(result) = self.search_results.get(self.search_index) else {
+            return;
+        };
+        let video_id = self
+            .search_video_choices
+            .get(self.search_video_index)
+            .map_or("", |choice| choice.format_id.as_str());
+        let audio_id = self
+            .search_audio_choices
+            .get(self.search_audio_index)
+            .map_or("", |choice| choice.format_id.as_str());
+        let format = match mode {
+            PlayerMode::Audio => {
+                if audio_id.is_empty() {
+                    "bestaudio/best".into()
+                } else {
+                    audio_id.into()
+                }
+            }
+            PlayerMode::Video => match (video_id.is_empty(), audio_id.is_empty()) {
+                (false, false) => format!("{video_id}+{audio_id}/{video_id}"),
+                (false, true) => video_id.into(),
+                (true, false) => audio_id.into(),
+                (true, true) => "bestvideo+bestaudio/best".into(),
+            },
+        };
+        if let Some(controller) = self.player_controller.take() {
+            let _ = controller.send(PlayerControl::Stop);
+        }
+        self.player_token = self.player_token.wrapping_add(1);
+        self.playback_title = result.title.clone();
+        self.playback_mode = mode;
+        self.playback_state = PlaybackState::Loading;
+        self.playback_position = 0.0;
+        self.playback_duration = result.duration.unwrap_or(0.0);
+        self.player_controller = Some(ytdlp::start_player(
+            result.url.clone(),
+            format,
+            mode,
+            self.player_token,
+            self.event_tx.clone(),
+        ));
+        self.notice = format!(
+            "Connecting {} player: {}",
+            if mode == PlayerMode::Video {
+                "video"
+            } else {
+                "audio"
+            },
+            result.title
+        );
+    }
+
+    pub fn stop_playback(&mut self) {
         if let Some(controller) = self.player_controller.take() {
             let _ = controller.send(PlayerControl::Stop);
         }
         self.playback_state = PlaybackState::Stopped;
+        self.playback_position = 0.0;
+        self.notice = "Playback stopped".into();
+    }
+
+    pub fn seek_playback_relative(&mut self, seconds: f64) {
+        if let Some(controller) = &self.player_controller {
+            let _ = controller.send(PlayerControl::SeekRelative(seconds));
+            self.notice = format!(
+                "Seeking {}{} seconds",
+                if seconds >= 0.0 { "+" } else { "" },
+                seconds.round()
+            );
+        }
+    }
+
+    pub fn seek_playback_percent(&mut self, permille: u16) {
+        if let Some(controller) = &self.player_controller {
+            let percent = f64::from(permille.min(1000)) / 10.0;
+            let _ = controller.send(PlayerControl::SeekPercent(percent));
+            self.playback_position = self.playback_duration * percent / 100.0;
+            self.notice = format!("Seeking to {:.0}%", percent);
+        }
+    }
+
+    pub fn set_playback_volume(&mut self, volume: f64) {
+        self.playback_volume = volume.clamp(0.0, 100.0);
+        if let Some(controller) = &self.player_controller {
+            let _ = controller.send(PlayerControl::SetVolume(self.playback_volume));
+        }
+        self.notice = format!("Volume {:.0}%", self.playback_volume);
+    }
+
+    pub fn adjust_playback_volume(&mut self, delta: f64) {
+        self.set_playback_volume(self.playback_volume + delta);
+    }
+
+    pub fn toggle_playback_mute(&mut self) {
+        if let Some(controller) = &self.player_controller {
+            let _ = controller.send(PlayerControl::ToggleMute);
+            self.playback_muted = !self.playback_muted;
+            self.notice = if self.playback_muted {
+                "Muted".into()
+            } else {
+                "Unmuted".into()
+            };
+        }
+    }
+
+    pub fn adjust_playback_speed(&mut self, delta: f64) {
+        self.playback_speed = (self.playback_speed + delta).clamp(0.25, 3.0);
+        if let Some(controller) = &self.player_controller {
+            let _ = controller.send(PlayerControl::SetSpeed(self.playback_speed));
+        }
+        self.notice = format!("Playback speed {:.2}×", self.playback_speed);
+    }
+
+    pub fn reset_playback_speed(&mut self) {
+        self.playback_speed = 1.0;
+        if let Some(controller) = &self.player_controller {
+            let _ = controller.send(PlayerControl::SetSpeed(1.0));
+        }
+        self.notice = "Playback speed reset to 1×".into();
     }
 
     pub fn add_urls(&mut self, go_queue: bool) {
@@ -1424,7 +1626,8 @@ impl App {
     }
 
     pub fn click(&mut self, mouse: MouseEvent) {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        let dragging = mouse.kind == MouseEventKind::Drag(MouseButton::Left);
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) && !dragging {
             return;
         }
         let action = self
@@ -1433,6 +1636,19 @@ impl App {
             .rev()
             .find(|h| contains(h.rect, mouse.column, mouse.row))
             .map(|h| h.action.clone());
+        if dragging
+            && !matches!(
+                action,
+                Some(
+                    ClickAction::SeekPlayback(_)
+                        | ClickAction::SetPlaybackVolume(_)
+                        | ClickAction::SearchVideoQuality(_)
+                        | ClickAction::SearchAudioQuality(_)
+                )
+            )
+        {
+            return;
+        }
         match action {
             Some(ClickAction::Tab(t)) => self.tab = t,
             Some(ClickAction::SearchInput) => self.edit(
@@ -1449,8 +1665,18 @@ impl App {
             Some(ClickAction::SearchVideoQuality(i)) => self.set_search_video(i),
             Some(ClickAction::SearchAudioQuality(i)) => self.set_search_audio(i),
             Some(ClickAction::ToggleSearchSubtitles) => self.toggle_search_subtitles(),
-            Some(ClickAction::TogglePlayback) => self.toggle_audio_preview(),
-            Some(ClickAction::StopPlayback) => self.stop_audio_preview(),
+            Some(ClickAction::TogglePlayback) => self.toggle_playback(),
+            Some(ClickAction::PlayAudio) => self.play_audio(),
+            Some(ClickAction::PlayVideo) => self.play_video(),
+            Some(ClickAction::StopPlayback) => self.stop_playback(),
+            Some(ClickAction::SeekPlayback(position)) => self.seek_playback_percent(position),
+            Some(ClickAction::SetPlaybackVolume(volume)) => {
+                self.set_playback_volume(f64::from(volume))
+            }
+            Some(ClickAction::TogglePlaybackMute) => self.toggle_playback_mute(),
+            Some(ClickAction::AdjustPlaybackSpeed(increase)) => {
+                self.adjust_playback_speed(if increase { 0.1 } else { -0.1 })
+            }
             Some(ClickAction::Preset(i)) => {
                 self.preset_index = i;
                 self.apply_preset();
@@ -1494,7 +1720,7 @@ impl App {
                     self.options.embed_thumbnail = true;
                     self.options.metadata = true;
                     self.notice =
-                        "Audio mode automatically embeds the best thumbnail as cover art".into();
+                        "Audio mode keeps the source stream and embeds the HD artwork".into();
                 }
             }
             1 => {
@@ -2161,8 +2387,12 @@ fn dependency_status(settings: &Settings) -> Vec<(String, bool)> {
         ),
         ("viu (optional)".into(), ytdlp::executable_exists("viu")),
         (
-            "mpv audio preview (optional)".into(),
+            "mpv media player (optional)".into(),
             ytdlp::executable_exists("mpv"),
+        ),
+        (
+            "ffmpegthumbnailer (desktop artwork)".into(),
+            ytdlp::executable_exists("ffmpegthumbnailer"),
         ),
     ]
 }

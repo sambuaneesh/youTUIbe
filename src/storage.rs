@@ -7,9 +7,9 @@ use std::{
 };
 
 pub fn data_dir() -> PathBuf {
-    ProjectDirs::from("dev", "tide", "tide-dlp")
+    ProjectDirs::from("dev", "youtuibe", "youtuibe")
         .map(|p| p.data_local_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".tide-dlp"))
+        .unwrap_or_else(|| PathBuf::from(".youtuibe"))
 }
 
 pub fn state_path() -> PathBuf {
@@ -18,6 +18,16 @@ pub fn state_path() -> PathBuf {
 
 pub fn load(path: &Path) -> Result<PersistedState> {
     if !path.exists() {
+        // Import the previous application state once, leaving the original intact.
+        if path == state_path()
+            && let Some(legacy) = ProjectDirs::from("dev", "tide", "tide-dlp")
+                .map(|dirs| dirs.data_local_dir().join("state.json"))
+            && legacy.exists()
+        {
+            let state = load(&legacy)?;
+            save_atomic(path, &state)?;
+            return Ok(state);
+        }
         return Ok(PersistedState::default());
     }
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
