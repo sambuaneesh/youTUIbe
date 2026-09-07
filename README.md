@@ -103,7 +103,7 @@ Audio original and the Search audio-only controls preserve the compressed source
 
 Packaging is prepared for `youtuibe` (source build) and `youtuibe-bin` (x86_64 prebuilt release). Both install `/usr/bin/youtuibe` and conflict with one another. They require yt-dlp, FFmpeg, mpv, viu, and ffmpegthumbnailer; optional acceleration, notifications, and display detection are listed in their package metadata.
 
-The packages are not submitted automatically. Once published, install either with `yay -S youtuibe` or `yay -S youtuibe-bin`. Maintainers should follow [the release guide](docs/RELEASING.md) to generate checksummed archives and AUR metadata. Do not upload binaries to an AUR Git repository.
+Install either with `yay -S youtuibe` or `yay -S youtuibe-bin`. Maintainers should follow [the release guide](docs/RELEASING.md) to generate checksummed archives and AUR metadata. Do not upload binaries to an AUR Git repository.
 
 ## Troubleshooting
 

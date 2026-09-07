@@ -16,7 +16,7 @@ provides=('youtuibe')
 conflicts=('youtuibe')
 _archive="youtuibe-${pkgver}-x86_64-unknown-linux-gnu"
 source=("${_archive}.tar.gz::https://github.com/sambuaneesh/youTUIbe/releases/download/v${pkgver}/${_archive}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('1bc77d3fa8f50a4a038a0bc003e867884bd943287483c8581f0ca0000c19ba6d')
 
 package() {
   cd "${_archive}"
