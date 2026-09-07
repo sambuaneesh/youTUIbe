@@ -1,0 +1,4 @@
+/target/
+*.part
+*.ytdl
+.DS_Store
