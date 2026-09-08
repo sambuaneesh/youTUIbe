@@ -62,7 +62,7 @@ pub fn save_atomic(path: &Path, state: &PersistedState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DownloadOptions, Job};
+    use crate::model::{DownloadOptions, Job, Settings};
 
     #[test]
     fn atomic_round_trip_and_recovery() {
@@ -79,5 +79,18 @@ mod tests {
         save_atomic(&path, &state).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.jobs[0].status, DownloadStatus::Queued);
+    }
+
+    #[test]
+    fn old_state_without_music_fields_remains_compatible() {
+        let legacy = serde_json::json!({
+            "settings": Settings::default(),
+            "jobs": []
+        });
+        let loaded: PersistedState = serde_json::from_value(legacy).unwrap();
+        assert!(loaded.music_queue.is_empty());
+        assert!(loaded.current_track.is_none());
+        assert!(loaded.playlists.is_empty());
+        assert!(loaded.recently_played.is_empty());
     }
 }

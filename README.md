@@ -1,13 +1,16 @@
 # youTUIbe
 
-Search, listen, and download from your terminal. **youTUIbe** combines a persistent download queue, a media player, and a guided yt-dlp builder in one keyboard and mouse interface. The command is always `youtuibe`.
+Search, listen, organize, and download from your terminal. **youTUIbe** combines a music-first player, persistent playlists and Up Next queue, download manager, and guided yt-dlp builder in one keyboard and mouse interface. The command is always `youtuibe`.
 
-[Releases](https://github.com/sambuaneesh/youTUIbe/releases) · [Report an issue](https://github.com/sambuaneesh/youTUIbe/issues) · [Release and AUR guide](docs/RELEASING.md)
+[Music features](docs/MUSIC_FEATURES.md) · [Releases](https://github.com/sambuaneesh/youTUIbe/releases) · [Report an issue](https://github.com/sambuaneesh/youTUIbe/issues) · [Release and AUR guide](docs/RELEASING.md)
 
 Linux is the supported platform. Video playback opens an mpv window; audio playback stays in the terminal. Search requires no YouTube API key.
 
 ## Highlights
 
+- Music-first startup: Search is the home screen; press `Enter` to play, `a` to queue, `n` to play next, or `l` to save the result to a playlist
+- Persistent Up Next queue with automatic progression, failed-track skipping, previous/next controls, listening history, and direct queue management
+- Persistent custom playlists with create, rename, delete, add, remove, browse, play, and enqueue workflows entirely inside the terminal
 - Seven practical presets: display-aware best video, compatible 1080p MP4, 4K archival, MP3, original audio, 720p saver, and metadata kit
 - Automatic high-quality cover art for every audio-only download while retaining the original compressed stream; youTUIbe also installs a user-level Opus thumbnailer registration when supported so desktop file managers can display that embedded artwork
 - Active-monitor detection through Hyprland, xrandr, or Linux DRM; the default preset caps both video width and height to that screen while retaining the best audio stream
@@ -71,7 +74,7 @@ Use `youtuibe --help` for CLI flags. Inside youTUIbe, press `?` for the full key
 
 | Key | Action |
 |---|---|
-| `1`…`7` | Switch tabs |
+| `1`…`8` | Switch tabs |
 | `/` | Edit URL or search input |
 | `j` / `k` | Change preset or selected row |
 | arrows / `Space` | Navigate and change options |
@@ -81,11 +84,15 @@ Use `youtuibe --help` for CLI flags. Inside youTUIbe, press `?` for the full key
 | `p` | Pause or resume selected job |
 | `x` | Cancel while retaining partial data |
 | `r` / `R` | Retry safely / retry with overwrite |
-| `c` | Show command preview (clear logs on Logs tab) |
+| `c` | Context action: customize, command preview, or clear the current history/log view |
 | `o` | Search installed yt-dlp options |
 | `q` | Save and quit |
 
-On the Search tab, `/` or `e` edits and runs a query, `s`/`r` reruns it, `[`/`]` changes the video stream, `{`/`}` changes the audio stream, and `t` toggles discovered captions. `p` starts complete audio, `P` opens complete video in mpv, `Space` pauses/resumes, `x` stops, arrows seek, `-`/`+` adjust volume, `m` mutes, and `,`/`.` adjust playback speed (`0` resets it). The timeline and volume bars are mouse-seekable. `v` opens artwork in a full-terminal `viu` view. `Enter` sends the configured result to the Download builder, `a` queues it, `d` queues and opens the Queue tab, and `i` performs a full format inspection. Search, metadata, playback, and thumbnail networking are independent of the download engine: failures leave every direct-URL feature operational.
+On the Search tab, `/` or `e` edits and runs a query, `s`/`r` reruns it, `Enter` plays immediately, `a` adds to Up Next, `n` inserts as the next song, and `l` saves to a custom playlist. `Shift+Enter` opens the selected result in Download while retaining the globally selected preset and builder options; `Ctrl+Enter` queues it immediately with those global options. `d` remains the direct exact-format action driven by the Search quality sliders, while `D` also opens the download queue. `[`/`]` changes video quality, `{`/`}` changes audio quality, and `t` toggles captions. `Space` pauses/resumes, `x` stops, `B`/`N` plays previous/next, arrows seek, `-`/`+` adjusts volume, `m` mutes, and `,`/`.` changes speed (`0` resets). The timeline and volume bars are mouse-seekable, and `v` opens full-terminal artwork.
+
+The Playlists tab is a three-pane library: playlists, their tracks, and Up Next. Move focus with `h`/`l` or left/right; use `j`/`k` to select. `c` creates a playlist, `r` renames it, `Enter` plays, `a` queues, and `x` removes the focused track or confirms playlist deletion. Playlist and queue state is atomically saved with the rest of the application.
+
+On History, `c` clears all completed, failed, and cancelled records after confirmation. Media files and the yt-dlp download archive are never removed. If playback is stopped while Up Next still contains songs, `Space` or the visible Resume control continues the queue.
 
 ## Performance guidance
 

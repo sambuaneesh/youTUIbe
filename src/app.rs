@@ -1,8 +1,8 @@
 use crate::{
     display::{self, DisplayInfo},
     model::{
-        DownloadOptions, DownloadStatus, Job, MediaMode, PersistedState, Preset, Quality, Settings,
-        presets,
+        DownloadOptions, DownloadStatus, Job, MediaMode, MusicPlaylist, MusicTrack, PersistedState,
+        Preset, Quality, Settings, presets,
     },
     storage, thumbnail_cache,
     ytdlp::{
@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub enum Tab {
     Download,
     Search,
+    Playlists,
     Queue,
     History,
     Settings,
@@ -33,9 +34,10 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
-        Tab::Download,
+    pub const ALL: [Tab; 8] = [
         Tab::Search,
+        Tab::Playlists,
+        Tab::Download,
         Tab::Queue,
         Tab::History,
         Tab::Settings,
@@ -51,6 +53,8 @@ impl Tab {
 pub enum EditTarget {
     Url,
     SearchQuery,
+    NewPlaylist { add_selected: bool },
+    RenamePlaylist(usize),
     RawArgs,
     SubtitleLanguages,
     PlaylistItems,
@@ -78,6 +82,11 @@ pub enum Modal {
     },
     Command(String),
     ConfirmCancel(Uuid),
+    PickPlaylist {
+        selected: usize,
+    },
+    ConfirmDeletePlaylist(usize),
+    ConfirmClearHistory,
     Error(String),
 }
 
@@ -87,14 +96,24 @@ pub enum ClickAction {
     SearchInput,
     RunSearch,
     SearchResult(usize),
-    UseSearchResult,
-    QueueSearchResult,
+    PlaySearchResult,
+    EnqueueSearchResult,
+    OpenDownloadOptions,
+    QuickDownloadPreset,
+    OpenPlaylistPicker,
+    PickPlaylist(usize),
+    Playlist(usize),
+    PlaylistTrack(usize),
+    MusicQueueTrack(usize),
+    PlayPlaylistTrack,
+    EnqueuePlaylistTrack,
+    PreviousTrack,
+    NextTrack,
     ViewSearchThumbnail,
     SearchVideoQuality(usize),
     SearchAudioQuality(usize),
     ToggleSearchSubtitles,
     TogglePlayback,
-    PlayAudio,
     PlayVideo,
     StopPlayback,
     SeekPlayback(u16),
@@ -112,6 +131,7 @@ pub enum ClickAction {
     Url,
     PauseResume,
     Retry,
+    ClearHistory,
     Cancel,
     CloseModal,
 }
@@ -129,6 +149,13 @@ pub enum PlaybackState {
     Loading,
     Playing,
     Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistFocus {
+    Playlists,
+    Tracks,
+    UpNext,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +197,14 @@ pub struct App {
     pub playback_volume: f64,
     pub playback_speed: f64,
     pub playback_muted: bool,
+    pub current_track: Option<MusicTrack>,
+    pub music_queue: VecDeque<MusicTrack>,
+    pub recently_played: Vec<MusicTrack>,
+    pub playlists: Vec<MusicPlaylist>,
+    pub playlist_index: usize,
+    pub playlist_track_index: usize,
+    pub music_queue_index: usize,
+    pub playlist_focus: PlaylistFocus,
     pub builder_index: usize,
     pub queue_index: usize,
     pub history_index: usize,
@@ -220,6 +255,10 @@ impl App {
             ps[0].options.quality = Quality::Best;
         }
         let settings = state.settings;
+        let mut music_queue: VecDeque<MusicTrack> = state.music_queue.into();
+        if let Some(interrupted_track) = state.current_track {
+            music_queue.push_front(interrupted_track);
+        }
         let dependencies = dependency_status(&settings);
         let options = ps[0].options.clone();
         let notice = display.as_ref().map_or_else(
@@ -235,7 +274,7 @@ impl App {
             },
         );
         Self {
-            tab: Tab::Download,
+            tab: Tab::Search,
             url: String::new(),
             preset_index: 0,
             presets: ps,
@@ -267,6 +306,14 @@ impl App {
             playback_volume: 100.0,
             playback_speed: 1.0,
             playback_muted: false,
+            current_track: None,
+            music_queue,
+            recently_played: state.recently_played,
+            playlists: state.playlists,
+            playlist_index: 0,
+            playlist_track_index: 0,
+            music_queue_index: 0,
+            playlist_focus: PlaylistFocus::Playlists,
             builder_index: 0,
             queue_index: 0,
             history_index: 0,
@@ -313,6 +360,10 @@ impl App {
         PersistedState {
             settings: self.settings.clone(),
             jobs: self.jobs.clone(),
+            current_track: self.current_track.clone(),
+            music_queue: self.music_queue.iter().cloned().collect(),
+            playlists: self.playlists.clone(),
+            recently_played: self.recently_played.clone(),
         }
     }
 
@@ -565,11 +616,34 @@ impl App {
                 self.player_controller = None;
                 self.playback_state = PlaybackState::Stopped;
                 self.playback_position = 0.0;
-                self.notice = if error.is_empty() {
-                    "Playback stopped".into()
+                if let Some(track) = self.current_track.take() {
+                    self.push_recent(track);
+                    if self.music_queue.is_empty() {
+                        self.notice = if error.is_empty() {
+                            "Up Next finished".into()
+                        } else {
+                            format!("Track unavailable: {}", compact_error(&error))
+                        };
+                    } else {
+                        if !error.is_empty() {
+                            self.logs.push_back(format!(
+                                "[player] skipped unavailable track: {}",
+                                compact_error(&error)
+                            ));
+                        }
+                        self.play_next_from_queue();
+                    }
                 } else {
-                    format!("Playback unavailable: {}", compact_error(&error))
-                };
+                    self.notice = if error.is_empty() {
+                        if self.music_queue.is_empty() {
+                            "Playback stopped".into()
+                        } else {
+                            "Queue stopped · press Space or Resume to continue".into()
+                        }
+                    } else {
+                        format!("Playback unavailable: {}", compact_error(&error))
+                    };
+                }
             }
             EngineEvent::PlayerFinished { .. } => {}
         }
@@ -616,7 +690,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.tab = Tab::Help,
-            KeyCode::Char('1'..='7') => {
+            KeyCode::Char('1'..='8') => {
                 if let KeyCode::Char(c) = key.code {
                     self.tab = Tab::ALL[(c as usize - '1' as usize).min(Tab::ALL.len() - 1)];
                 }
@@ -630,6 +704,7 @@ impl App {
             _ => match self.tab {
                 Tab::Download => self.download_key(key),
                 Tab::Search => self.search_key(key),
+                Tab::Playlists => self.playlists_key(key),
                 Tab::Queue => self.queue_key(key),
                 Tab::History => self.history_key(key),
                 Tab::Settings => self.settings_key(key),
@@ -739,6 +814,43 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => return,
                 _ => {}
             },
+            Modal::PickPlaylist { selected } => match key.code {
+                KeyCode::Esc => return,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(self.playlists.len().saturating_sub(1));
+                }
+                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                KeyCode::Char('c') => {
+                    self.edit(
+                        "New playlist name",
+                        String::new(),
+                        EditTarget::NewPlaylist { add_selected: true },
+                        false,
+                    );
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.add_selected_search_to_playlist(*selected);
+                    return;
+                }
+                _ => {}
+            },
+            Modal::ConfirmDeletePlaylist(index) => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.delete_playlist(*index);
+                    return;
+                }
+                KeyCode::Char('n') | KeyCode::Esc => return,
+                _ => {}
+            },
+            Modal::ConfirmClearHistory => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.clear_history();
+                    return;
+                }
+                KeyCode::Char('n') | KeyCode::Esc => return,
+                _ => {}
+            },
             Modal::Inspect => match key.code {
                 KeyCode::Esc | KeyCode::Enter => return,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -815,7 +927,13 @@ impl App {
             ),
             KeyCode::Char('s') | KeyCode::Char('r') => self.run_search(),
             KeyCode::Enter if self.search_results.is_empty() => self.run_search(),
-            KeyCode::Enter => self.use_search_selected(),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quick_download_selected()
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.use_search_selected()
+            }
+            KeyCode::Enter => self.play_selected_now(),
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.search_results.is_empty() {
                     self.select_search((self.search_index + 1).min(self.search_results.len() - 1));
@@ -824,8 +942,12 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.select_search(self.search_index.saturating_sub(1));
             }
-            KeyCode::Char('a') => self.queue_search_selected(false),
-            KeyCode::Char('d') => self.queue_search_selected(true),
+            KeyCode::Char('a') => self.enqueue_selected(false),
+            KeyCode::Char('n') => self.enqueue_selected(true),
+            KeyCode::Char('l') => self.open_playlist_picker(),
+            KeyCode::Char('d') => self.queue_search_selected(false),
+            KeyCode::Char('D') => self.queue_search_selected(true),
+            KeyCode::Char('c') => self.use_search_selected(),
             KeyCode::Char('i') => self.inspect_search_selected(),
             KeyCode::Char('v') => self.view_search_thumbnail(),
             KeyCode::Char('[') => self.adjust_search_video(false),
@@ -857,6 +979,88 @@ impl App {
             KeyCode::Char(',') => self.adjust_playback_speed(-0.1),
             KeyCode::Char('.') => self.adjust_playback_speed(0.1),
             KeyCode::Char('0') => self.reset_playback_speed(),
+            KeyCode::Char('N') => self.next_track(),
+            KeyCode::Char('B') => self.previous_track(),
+            _ => {}
+        }
+    }
+
+    fn playlists_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.playlist_focus = match self.playlist_focus {
+                    PlaylistFocus::Playlists => PlaylistFocus::Playlists,
+                    PlaylistFocus::Tracks => PlaylistFocus::Playlists,
+                    PlaylistFocus::UpNext => PlaylistFocus::Tracks,
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.playlist_focus = match self.playlist_focus {
+                    PlaylistFocus::Playlists => PlaylistFocus::Tracks,
+                    PlaylistFocus::Tracks | PlaylistFocus::UpNext => PlaylistFocus::UpNext,
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => match self.playlist_focus {
+                PlaylistFocus::Playlists => {
+                    self.playlist_index =
+                        (self.playlist_index + 1).min(self.playlists.len().saturating_sub(1));
+                    self.playlist_track_index = 0;
+                }
+                PlaylistFocus::Tracks => {
+                    self.playlist_track_index = (self.playlist_track_index + 1)
+                        .min(self.selected_playlist_len().saturating_sub(1));
+                }
+                PlaylistFocus::UpNext => {
+                    self.music_queue_index =
+                        (self.music_queue_index + 1).min(self.music_queue.len().saturating_sub(1));
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.playlist_focus {
+                PlaylistFocus::Playlists => {
+                    self.playlist_index = self.playlist_index.saturating_sub(1);
+                    self.playlist_track_index = 0;
+                }
+                PlaylistFocus::Tracks => {
+                    self.playlist_track_index = self.playlist_track_index.saturating_sub(1)
+                }
+                PlaylistFocus::UpNext => {
+                    self.music_queue_index = self.music_queue_index.saturating_sub(1)
+                }
+            },
+            KeyCode::Enter | KeyCode::Char('p') => match self.playlist_focus {
+                PlaylistFocus::UpNext => self.play_music_queue_track(),
+                _ => self.play_playlist_track(),
+            },
+            KeyCode::Char('a') => self.enqueue_playlist_track(),
+            KeyCode::Char('c') => self.edit(
+                "New playlist name",
+                String::new(),
+                EditTarget::NewPlaylist {
+                    add_selected: false,
+                },
+                false,
+            ),
+            KeyCode::Char('r') => {
+                if let Some(playlist) = self.playlists.get(self.playlist_index) {
+                    self.edit(
+                        "Rename playlist",
+                        playlist.name.clone(),
+                        EditTarget::RenamePlaylist(self.playlist_index),
+                        false,
+                    );
+                }
+            }
+            KeyCode::Delete | KeyCode::Char('x') => match self.playlist_focus {
+                PlaylistFocus::Playlists if !self.playlists.is_empty() => {
+                    self.modal = Some(Modal::ConfirmDeletePlaylist(self.playlist_index));
+                }
+                PlaylistFocus::Tracks => self.remove_playlist_track(),
+                PlaylistFocus::UpNext => self.remove_music_queue_track(),
+                _ => {}
+            },
+            KeyCode::Char('N') | KeyCode::Char(']') => self.next_track(),
+            KeyCode::Char('B') | KeyCode::Char('[') => self.previous_track(),
+            KeyCode::Char(' ') => self.toggle_playback(),
             _ => {}
         }
     }
@@ -894,7 +1098,10 @@ impl App {
             }
             KeyCode::Char('r') => self.retry_selected(false),
             KeyCode::Char('R') => self.retry_selected(true),
-            KeyCode::Enter | KeyCode::Char('c') => self.preview_selected_history(),
+            KeyCode::Enter => self.preview_selected_history(),
+            KeyCode::Char('c') if !self.history_jobs().is_empty() => {
+                self.modal = Some(Modal::ConfirmClearHistory);
+            }
             _ => {}
         }
     }
@@ -961,6 +1168,12 @@ impl App {
                 self.search_query = value;
                 self.run_search();
             }
+            EditTarget::NewPlaylist { add_selected } => {
+                if self.create_playlist(value) && add_selected {
+                    self.add_selected_search_to_playlist(self.playlist_index);
+                }
+            }
+            EditTarget::RenamePlaylist(index) => self.rename_playlist(index, value),
             EditTarget::RawArgs => self.options.raw_args = value,
             EditTarget::SubtitleLanguages => self.options.subtitle_languages = value,
             EditTarget::PlaylistItems => self.options.playlist_items = value,
@@ -1001,8 +1214,6 @@ impl App {
     pub fn select_search(&mut self, index: usize) {
         if index < self.search_results.len() {
             self.search_index = index;
-            self.stop_playback();
-            self.playback_duration = self.search_results[index].duration.unwrap_or(0.0);
             self.load_selected_thumbnail();
             self.load_selected_details();
         }
@@ -1148,18 +1359,28 @@ impl App {
         let Some(result) = self.search_results.get(self.search_index).cloned() else {
             return;
         };
-        let options = match self.configured_search_options() {
-            Ok(options) => options,
-            Err(error) => {
-                self.notice = error;
-                return;
-            }
-        };
-        self.options = options;
         self.url = result.url;
         self.metadata = None;
         self.tab = Tab::Download;
-        self.notice = format!("Ready to configure: {}", result.title);
+        self.notice = format!(
+            "Download options for {} · current preset: {}",
+            result.title, self.presets[self.preset_index].name
+        );
+    }
+
+    pub fn quick_download_selected(&mut self) {
+        let Some(result) = self.search_results.get(self.search_index).cloned() else {
+            self.notice = "Search for something to download first".into();
+            return;
+        };
+        let preset = self.presets[self.preset_index].name.to_string();
+        let mut job = Job::new(result.url, preset.clone(), self.options.clone());
+        job.title = result.title.clone();
+        job.command_preview = ytdlp::command_preview(&job, &self.settings);
+        self.jobs.push(job);
+        self.notice = format!("Queued {} with preset {preset}", result.title);
+        self.dirty = true;
+        self.save();
     }
 
     pub fn queue_search_selected(&mut self, go_queue: bool) {
@@ -1314,7 +1535,9 @@ impl App {
             PlaybackState::Loading => {
                 self.notice = "The player is still connecting…".into();
             }
-            PlaybackState::Stopped => self.start_playback(self.playback_mode),
+            PlaybackState::Stopped if !self.music_queue.is_empty() => self.play_next_from_queue(),
+            PlaybackState::Stopped if self.tab == Tab::Playlists => self.play_playlist_track(),
+            PlaybackState::Stopped => self.start_playback(PlayerMode::Audio),
         }
     }
 
@@ -1341,9 +1564,10 @@ impl App {
             self.notice = "Playback needs the optional mpv executable".into();
             return;
         }
-        let Some(result) = self.search_results.get(self.search_index) else {
+        let Some(result) = self.search_results.get(self.search_index).cloned() else {
             return;
         };
+        let track = track_from_search(&result);
         let video_id = self
             .search_video_choices
             .get(self.search_video_index)
@@ -1367,12 +1591,16 @@ impl App {
                 (true, true) => "bestvideo+bestaudio/best".into(),
             },
         };
+        if let Some(previous) = self.current_track.take() {
+            self.push_recent(previous);
+        }
         if let Some(controller) = self.player_controller.take() {
             let _ = controller.send(PlayerControl::Stop);
         }
         self.player_token = self.player_token.wrapping_add(1);
         self.playback_title = result.title.clone();
         self.playback_mode = mode;
+        self.current_track = (mode == PlayerMode::Audio).then_some(track);
         self.playback_state = PlaybackState::Loading;
         self.playback_position = 0.0;
         self.playback_duration = result.duration.unwrap_or(0.0);
@@ -1395,12 +1623,274 @@ impl App {
     }
 
     pub fn stop_playback(&mut self) {
+        if let Some(track) = self.current_track.take() {
+            self.music_queue.push_front(track);
+            self.music_queue_index = 0;
+            self.dirty = true;
+        }
         if let Some(controller) = self.player_controller.take() {
             let _ = controller.send(PlayerControl::Stop);
         }
         self.playback_state = PlaybackState::Stopped;
         self.playback_position = 0.0;
-        self.notice = "Playback stopped".into();
+        self.notice = if self.music_queue.is_empty() {
+            "Playback stopped".into()
+        } else {
+            "Queue stopped · press Space or Resume to continue".into()
+        };
+        self.save();
+    }
+
+    pub fn play_selected_now(&mut self) {
+        let Some(result) = self.search_results.get(self.search_index) else {
+            self.notice = "Search for a song first".into();
+            return;
+        };
+        let track = track_from_search(result);
+        self.start_music_track(track);
+    }
+
+    pub fn enqueue_selected(&mut self, next: bool) {
+        let Some(result) = self.search_results.get(self.search_index) else {
+            self.notice = "Search for a song first".into();
+            return;
+        };
+        let track = track_from_search(result);
+        let title = track.title.clone();
+        if next {
+            self.music_queue.push_front(track);
+        } else {
+            self.music_queue.push_back(track);
+        }
+        self.dirty = true;
+        self.save();
+        self.notice = format!(
+            "{}: {title}",
+            if next {
+                "Playing next"
+            } else {
+                "Added to Up Next"
+            }
+        );
+        if self.playback_state == PlaybackState::Stopped && self.current_track.is_none() {
+            self.play_next_from_queue();
+        }
+    }
+
+    fn start_music_track(&mut self, track: MusicTrack) {
+        if !ytdlp::executable_exists("mpv") {
+            self.notice = "Playback needs the optional mpv executable".into();
+            return;
+        }
+        if let Some(previous) = self.current_track.take() {
+            self.push_recent(previous);
+        }
+        if let Some(controller) = self.player_controller.take() {
+            let _ = controller.send(PlayerControl::Stop);
+        }
+        self.player_token = self.player_token.wrapping_add(1);
+        self.playback_title = track.title.clone();
+        self.playback_mode = PlayerMode::Audio;
+        self.playback_state = PlaybackState::Loading;
+        self.playback_position = 0.0;
+        self.playback_duration = track.duration.unwrap_or(0.0);
+        self.current_track = Some(track.clone());
+        self.player_controller = Some(ytdlp::start_player(
+            track.url,
+            "bestaudio/best".into(),
+            PlayerMode::Audio,
+            self.player_token,
+            self.event_tx.clone(),
+        ));
+        self.notice = format!("Connecting: {} — {}", track.title, track.artist);
+        self.dirty = true;
+    }
+
+    fn play_next_from_queue(&mut self) {
+        if let Some(track) = self.music_queue.pop_front() {
+            self.music_queue_index = self
+                .music_queue_index
+                .min(self.music_queue.len().saturating_sub(1));
+            self.start_music_track(track);
+            self.save();
+        } else {
+            self.current_track = None;
+            self.playback_state = PlaybackState::Stopped;
+            self.notice = "Up Next is empty".into();
+        }
+    }
+
+    pub fn next_track(&mut self) {
+        if let Some(track) = self.current_track.take() {
+            self.push_recent(track);
+        }
+        self.play_next_from_queue();
+    }
+
+    pub fn previous_track(&mut self) {
+        let Some(previous) = self.recently_played.pop() else {
+            self.notice = "No previous track".into();
+            return;
+        };
+        if let Some(current) = self.current_track.take() {
+            self.music_queue.push_front(current);
+        }
+        self.start_music_track(previous);
+    }
+
+    fn push_recent(&mut self, track: MusicTrack) {
+        self.recently_played.retain(|item| item.url != track.url);
+        self.recently_played.push(track);
+        if self.recently_played.len() > 100 {
+            self.recently_played.remove(0);
+        }
+        self.dirty = true;
+    }
+
+    pub fn open_playlist_picker(&mut self) {
+        if self.search_results.get(self.search_index).is_none() {
+            self.notice = "Search for a song first".into();
+        } else if self.playlists.is_empty() {
+            self.edit(
+                "New playlist name",
+                String::new(),
+                EditTarget::NewPlaylist { add_selected: true },
+                false,
+            );
+        } else {
+            self.modal = Some(Modal::PickPlaylist {
+                selected: self.playlist_index.min(self.playlists.len() - 1),
+            });
+        }
+    }
+
+    fn create_playlist(&mut self, name: String) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            self.notice = "Playlist name cannot be empty".into();
+            return false;
+        }
+        self.playlists.push(MusicPlaylist::named(name.into()));
+        self.playlist_index = self.playlists.len() - 1;
+        self.dirty = true;
+        self.save();
+        self.notice = format!("Created playlist “{name}”");
+        true
+    }
+
+    fn rename_playlist(&mut self, index: usize, name: String) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.notice = "Playlist name cannot be empty".into();
+        } else if let Some(playlist) = self.playlists.get_mut(index) {
+            playlist.name = name.into();
+            self.dirty = true;
+            self.save();
+            self.notice = format!("Renamed playlist to “{name}”");
+        }
+    }
+
+    fn delete_playlist(&mut self, index: usize) {
+        if index < self.playlists.len() {
+            let removed = self.playlists.remove(index);
+            self.playlist_index = self
+                .playlist_index
+                .min(self.playlists.len().saturating_sub(1));
+            self.playlist_track_index = 0;
+            self.dirty = true;
+            self.save();
+            self.notice = format!("Deleted playlist “{}”", removed.name);
+        }
+    }
+
+    fn add_selected_search_to_playlist(&mut self, index: usize) {
+        let Some(track) = self
+            .search_results
+            .get(self.search_index)
+            .map(track_from_search)
+        else {
+            return;
+        };
+        let Some(playlist) = self.playlists.get_mut(index) else {
+            return;
+        };
+        if playlist.tracks.iter().any(|item| item.url == track.url) {
+            self.notice = format!("Already in “{}”", playlist.name);
+            return;
+        }
+        let title = track.title.clone();
+        let playlist_name = playlist.name.clone();
+        playlist.tracks.push(track);
+        self.dirty = true;
+        self.save();
+        self.notice = format!("Added {title} to “{playlist_name}”");
+    }
+
+    fn selected_playlist_len(&self) -> usize {
+        self.playlists
+            .get(self.playlist_index)
+            .map_or(0, |playlist| playlist.tracks.len())
+    }
+
+    pub fn play_playlist_track(&mut self) {
+        if let Some(track) = self
+            .playlists
+            .get(self.playlist_index)
+            .and_then(|playlist| playlist.tracks.get(self.playlist_track_index))
+            .cloned()
+        {
+            self.start_music_track(track);
+        }
+    }
+
+    pub fn enqueue_playlist_track(&mut self) {
+        if let Some(track) = self
+            .playlists
+            .get(self.playlist_index)
+            .and_then(|playlist| playlist.tracks.get(self.playlist_track_index))
+            .cloned()
+        {
+            let title = track.title.clone();
+            self.music_queue.push_back(track);
+            self.dirty = true;
+            self.save();
+            self.notice = format!("Added to Up Next: {title}");
+        }
+    }
+
+    pub fn remove_playlist_track(&mut self) {
+        if let Some(playlist) = self.playlists.get_mut(self.playlist_index)
+            && self.playlist_track_index < playlist.tracks.len()
+        {
+            let track = playlist.tracks.remove(self.playlist_track_index);
+            self.playlist_track_index = self
+                .playlist_track_index
+                .min(playlist.tracks.len().saturating_sub(1));
+            self.dirty = true;
+            self.save();
+            self.notice = format!("Removed {} from playlist", track.title);
+        }
+    }
+
+    pub fn play_music_queue_track(&mut self) {
+        if let Some(track) = self.music_queue.remove(self.music_queue_index) {
+            self.music_queue_index = self
+                .music_queue_index
+                .min(self.music_queue.len().saturating_sub(1));
+            self.start_music_track(track);
+            self.save();
+        }
+    }
+
+    pub fn remove_music_queue_track(&mut self) {
+        if let Some(track) = self.music_queue.remove(self.music_queue_index) {
+            self.music_queue_index = self
+                .music_queue_index
+                .min(self.music_queue.len().saturating_sub(1));
+            self.dirty = true;
+            self.save();
+            self.notice = format!("Removed from Up Next: {}", track.title);
+        }
     }
 
     pub fn seek_playback_relative(&mut self, seconds: f64) {
@@ -1619,6 +2109,19 @@ impl App {
             self.preview_id(id);
         }
     }
+
+    fn clear_history(&mut self) {
+        let removed = self
+            .jobs
+            .iter()
+            .filter(|job| job.status.is_terminal())
+            .count();
+        self.jobs.retain(|job| !job.status.is_terminal());
+        self.history_index = 0;
+        self.dirty = true;
+        self.save();
+        self.notice = format!("Cleared {removed} history entries; downloaded files were untouched");
+    }
     fn preview_id(&mut self, id: Uuid) {
         if let Some(j) = self.jobs.iter().find(|j| j.id == id) {
             self.modal = Some(Modal::Command(j.command_preview.clone()));
@@ -1659,14 +2162,37 @@ impl App {
             ),
             Some(ClickAction::RunSearch) => self.run_search(),
             Some(ClickAction::SearchResult(i)) => self.select_search(i),
-            Some(ClickAction::UseSearchResult) => self.use_search_selected(),
-            Some(ClickAction::QueueSearchResult) => self.queue_search_selected(false),
+            Some(ClickAction::PlaySearchResult) => self.play_selected_now(),
+            Some(ClickAction::EnqueueSearchResult) => self.enqueue_selected(false),
+            Some(ClickAction::OpenDownloadOptions) => self.use_search_selected(),
+            Some(ClickAction::QuickDownloadPreset) => self.quick_download_selected(),
+            Some(ClickAction::OpenPlaylistPicker) => self.open_playlist_picker(),
+            Some(ClickAction::PickPlaylist(i)) => {
+                self.add_selected_search_to_playlist(i);
+                self.modal = None;
+            }
+            Some(ClickAction::Playlist(i)) => {
+                self.playlist_index = i;
+                self.playlist_track_index = 0;
+                self.playlist_focus = PlaylistFocus::Playlists;
+            }
+            Some(ClickAction::PlaylistTrack(i)) => {
+                self.playlist_track_index = i;
+                self.playlist_focus = PlaylistFocus::Tracks;
+            }
+            Some(ClickAction::MusicQueueTrack(i)) => {
+                self.music_queue_index = i;
+                self.playlist_focus = PlaylistFocus::UpNext;
+            }
+            Some(ClickAction::PlayPlaylistTrack) => self.play_playlist_track(),
+            Some(ClickAction::EnqueuePlaylistTrack) => self.enqueue_playlist_track(),
+            Some(ClickAction::PreviousTrack) => self.previous_track(),
+            Some(ClickAction::NextTrack) => self.next_track(),
             Some(ClickAction::ViewSearchThumbnail) => self.view_search_thumbnail(),
             Some(ClickAction::SearchVideoQuality(i)) => self.set_search_video(i),
             Some(ClickAction::SearchAudioQuality(i)) => self.set_search_audio(i),
             Some(ClickAction::ToggleSearchSubtitles) => self.toggle_search_subtitles(),
             Some(ClickAction::TogglePlayback) => self.toggle_playback(),
-            Some(ClickAction::PlayAudio) => self.play_audio(),
             Some(ClickAction::PlayVideo) => self.play_video(),
             Some(ClickAction::StopPlayback) => self.stop_playback(),
             Some(ClickAction::SeekPlayback(position)) => self.seek_playback_percent(position),
@@ -1697,6 +2223,11 @@ impl App {
             Some(ClickAction::Url) => self.edit("URL", self.url.clone(), EditTarget::Url, false),
             Some(ClickAction::PauseResume) => self.pause_resume_selected(),
             Some(ClickAction::Retry) => self.retry_selected(false),
+            Some(ClickAction::ClearHistory) => {
+                if !self.history_jobs().is_empty() {
+                    self.modal = Some(Modal::ConfirmClearHistory);
+                }
+            }
             Some(ClickAction::Cancel) => self.confirm_cancel_selected(),
             Some(ClickAction::CloseModal) => self.modal = None,
             None => {}
@@ -2127,6 +2658,17 @@ fn none_choice() -> Vec<SearchFormatChoice> {
     }]
 }
 
+fn track_from_search(result: &SearchResult) -> MusicTrack {
+    MusicTrack {
+        id: result.id.clone(),
+        title: result.title.clone(),
+        artist: result.uploader.clone(),
+        duration: result.duration,
+        url: result.url.clone(),
+        thumbnail_url: result.thumbnail_url.clone(),
+    }
+}
+
 fn slider_step(current: usize, len: usize, next: bool) -> usize {
     if len == 0 {
         0
@@ -2400,6 +2942,19 @@ fn dependency_status(settings: &Settings) -> Vec<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn song_result() -> SearchResult {
+        SearchResult {
+            id: "song".into(),
+            title: "Song".into(),
+            uploader: "Artist".into(),
+            duration: Some(180.0),
+            url: "https://example.com/song".into(),
+            thumbnail_url: String::new(),
+            view_count: None,
+            live_status: String::new(),
+        }
+    }
     #[test]
     fn normalizes_bare_urls() {
         assert_eq!(
@@ -2465,5 +3020,126 @@ mod tests {
         assert_eq!(video[2].format_id, "v1080");
         assert_eq!(audio[0].label, "None");
         assert_eq!(audio[1].format_id, "a128");
+    }
+
+    #[test]
+    fn interrupted_track_returns_to_front_of_up_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = MusicTrack {
+            id: "current".into(),
+            title: "Current".into(),
+            url: "https://example.com/current".into(),
+            ..Default::default()
+        };
+        let queued = MusicTrack {
+            id: "queued".into(),
+            title: "Queued".into(),
+            url: "https://example.com/queued".into(),
+            ..Default::default()
+        };
+        let state = PersistedState {
+            current_track: Some(current),
+            music_queue: vec![queued],
+            ..Default::default()
+        };
+        let app = App::new(dir.path().join("state.json"), state, String::new());
+        assert_eq!(app.music_queue[0].id, "current");
+        assert_eq!(app.music_queue[1].id, "queued");
+    }
+
+    #[test]
+    fn playlist_save_deduplicates_the_same_song() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        app.search_results.push(song_result());
+        assert!(app.create_playlist("Favorites".into()));
+        app.add_selected_search_to_playlist(0);
+        app.add_selected_search_to_playlist(0);
+        assert_eq!(app.playlists[0].tracks.len(), 1);
+    }
+
+    #[test]
+    fn clearing_history_keeps_active_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        let mut completed = Job::new(
+            "https://example.com/done".into(),
+            "Audio".into(),
+            DownloadOptions::default(),
+        );
+        completed.status = DownloadStatus::Completed;
+        let queued = Job::new(
+            "https://example.com/queued".into(),
+            "Audio".into(),
+            DownloadOptions::default(),
+        );
+        app.jobs.extend([completed, queued]);
+        app.clear_history();
+        assert_eq!(app.jobs.len(), 1);
+        assert_eq!(app.jobs[0].status, DownloadStatus::Queued);
+    }
+
+    #[test]
+    fn stop_returns_current_track_to_resumable_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        app.current_track = Some(MusicTrack {
+            id: "current".into(),
+            title: "Current".into(),
+            url: "https://example.com/current".into(),
+            ..Default::default()
+        });
+        app.playback_state = PlaybackState::Playing;
+        app.stop_playback();
+        assert_eq!(app.playback_state, PlaybackState::Stopped);
+        assert_eq!(app.music_queue.front().unwrap().id, "current");
+    }
+
+    #[test]
+    fn shift_enter_opens_download_without_overwriting_global_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        app.preset_index = 3;
+        app.apply_preset();
+        app.search_results.push(song_result());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.tab, Tab::Download);
+        assert_eq!(app.url, "https://example.com/song");
+        assert_eq!(app.options.mode, MediaMode::Audio);
+        assert!(app.jobs.is_empty());
+    }
+
+    #[test]
+    fn control_enter_queues_with_global_download_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        app.preset_index = 3;
+        app.apply_preset();
+        app.search_results.push(song_result());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(app.jobs.len(), 1);
+        assert_eq!(app.jobs[0].preset, "Audio MP3");
+        assert_eq!(app.jobs[0].options.mode, MediaMode::Audio);
+        assert_eq!(app.tab, Tab::Search);
     }
 }

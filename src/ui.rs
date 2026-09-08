@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, ClickAction, Hit, Modal, PlaybackState, SearchFormatChoice, Tab},
+    app::{App, ClickAction, Hit, Modal, PlaybackState, PlaylistFocus, SearchFormatChoice, Tab},
     model::{DownloadStatus, Job},
     ytdlp::PlayerMode,
 };
@@ -17,9 +17,9 @@ use ratatui::{
 use ratatui_image::{Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
-const BG: Color = Color::Rgb(7, 11, 17);
-const PANEL: Color = Color::Rgb(13, 20, 29);
-const PANEL_2: Color = Color::Rgb(20, 30, 43);
+const BG: Color = Color::Rgb(0, 0, 0);
+const PANEL: Color = Color::Rgb(10, 15, 22);
+const PANEL_2: Color = Color::Rgb(18, 27, 38);
 const TEXT: Color = Color::Rgb(230, 237, 243);
 const MUTED: Color = Color::Rgb(126, 145, 164);
 const CYAN: Color = Color::Rgb(94, 234, 212);
@@ -58,6 +58,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.tab {
         Tab::Download => download(frame, app, root[2]),
         Tab::Search => search(frame, app, root[2]),
+        Tab::Playlists => playlists(frame, app, root[2]),
         Tab::Queue => queue(frame, app, root[2]),
         Tab::History => history(frame, app, root[2]),
         Tab::Settings => settings(frame, app, root[2]),
@@ -94,19 +95,36 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|j| j.status == DownloadStatus::Completed)
         .count();
-    let mut spans = vec![
-        Span::styled(
-            "  ◉  youTUIbe",
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  media, your way", Style::default().fg(MUTED)),
-        Span::raw("      "),
-        Span::styled(format!("● {active} active"), Style::default().fg(GREEN)),
-        Span::styled("    ", Style::default()),
-        Span::styled(format!("◆ {queued} queued"), Style::default().fg(ORANGE)),
-        Span::styled("    ", Style::default()),
-        Span::styled(format!("✓ {done} complete"), Style::default().fg(CYAN)),
-    ];
+    let mut spans = if area.width < 112 {
+        vec![
+            Span::styled(
+                "  ◉ youTUIbe",
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("    ≡ {} up next", app.music_queue.len()),
+                Style::default().fg(MUTED),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                "  ◉  youTUIbe",
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  music, instantly", Style::default().fg(MUTED)),
+            Span::raw("      "),
+            Span::styled(format!("● {active} active"), Style::default().fg(GREEN)),
+            Span::styled("    ", Style::default()),
+            Span::styled(format!("◆ {queued} queued"), Style::default().fg(ORANGE)),
+            Span::styled("    ", Style::default()),
+            Span::styled(format!("✓ {done} complete"), Style::default().fg(CYAN)),
+            Span::styled(
+                format!("    ≡ {} up next", app.music_queue.len()),
+                Style::default().fg(MUTED),
+            ),
+        ]
+    };
     if app.playback_state != PlaybackState::Stopped {
         spans.push(Span::styled(
             if app.playback_mode == PlayerMode::Video {
@@ -139,10 +157,21 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let compact = area.width < 112;
     let titles: Vec<Line> = Tab::ALL
         .iter()
         .enumerate()
-        .map(|(i, t)| Line::from(format!(" {} {} ", i + 1, tab_caption(*t))))
+        .map(|(i, t)| {
+            Line::from(format!(
+                " {} {} ",
+                i + 1,
+                if compact {
+                    tab_caption_compact(*t)
+                } else {
+                    tab_caption(*t)
+                }
+            ))
+        })
         .collect();
     frame.render_widget(
         Tabs::new(titles)
@@ -159,7 +188,15 @@ fn tabs(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     let mut x = area.x;
     for (i, tab) in Tab::ALL.iter().enumerate() {
-        let label = format!(" {} {} ", i + 1, tab_caption(*tab));
+        let label = format!(
+            " {} {} ",
+            i + 1,
+            if compact {
+                tab_caption_compact(*tab)
+            } else {
+                tab_caption(*tab)
+            }
+        );
         let width = UnicodeWidthStr::width(label.as_str()) as u16 + u16::from(i > 0);
         app.hits.push(Hit {
             rect: Rect::new(
@@ -338,6 +375,10 @@ fn download(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn search(frame: &mut Frame, app: &mut App, area: Rect) {
+    if area.width < 150 || area.height < 40 {
+        search_compact(frame, app, area);
+        return;
+    }
     let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(8)]).split(area);
     let query_row =
         Layout::horizontal([Constraint::Min(24), Constraint::Length(15)]).split(rows[0]);
@@ -470,6 +511,10 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
         let thumb_block = panel(&thumb_title);
         let thumb_inner = thumb_block.inner(top[0]);
         frame.render_widget(thumb_block, top[0]);
+        app.hits.push(Hit {
+            rect: top[0],
+            action: ClickAction::ViewSearchThumbnail,
+        });
         if let Some(protocol) = app.thumbnail.as_mut() {
             frame.render_stateful_widget(
                 StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3))),
@@ -588,7 +633,10 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(
             Paragraph::new(subtitles)
                 .style(Style::default().fg(subtitle_color))
-                .block(panel(" Captions  [t] toggle "))
+                .block(panel(&format!(
+                    " Captions  [t]  ·  Quick download: {} ",
+                    app.presets[app.preset_index].name
+                )))
                 .wrap(Wrap { trim: true }),
             tune[5],
         );
@@ -599,28 +647,259 @@ fn search(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let actions = Layout::horizontal([
-        Constraint::Percentage(25),
-        Constraint::Percentage(38),
-        Constraint::Percentage(37),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
     ])
     .split(preview[3]);
     if !compact {
-        button(frame, actions[0], "View", "v", CYAN);
-        button(frame, actions[1], "Customize", "Enter", GREEN);
-        button(frame, actions[2], "Download", "a", ORANGE);
+        button(frame, actions[0], "Play", "Enter", GREEN);
+        button(frame, actions[1], "Up Next", "a", CYAN);
+        button(frame, actions[2], "Playlist", "l", CYAN);
+        button(frame, actions[3], "Options", "⇧Enter", ORANGE);
+        button(frame, actions[4], "Quick", "⌃Enter", GREEN);
         app.hits.push(Hit {
             rect: actions[0],
-            action: ClickAction::ViewSearchThumbnail,
+            action: ClickAction::PlaySearchResult,
         });
         app.hits.push(Hit {
             rect: actions[1],
-            action: ClickAction::UseSearchResult,
+            action: ClickAction::EnqueueSearchResult,
         });
         app.hits.push(Hit {
             rect: actions[2],
-            action: ClickAction::QueueSearchResult,
+            action: ClickAction::OpenPlaylistPicker,
+        });
+        app.hits.push(Hit {
+            rect: actions[3],
+            action: ClickAction::OpenDownloadOptions,
+        });
+        app.hits.push(Hit {
+            rect: actions[4],
+            action: ClickAction::QuickDownloadPreset,
         });
     }
+}
+
+fn search_compact(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(4),
+        Constraint::Length(6),
+    ])
+    .split(area);
+    let query_row =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(12)]).split(rows[0]);
+    let query = if app.search_query.is_empty() {
+        "Type / to search for a song".to_string()
+    } else {
+        app.search_query.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(query)
+            .style(Style::default().fg(if app.search_query.is_empty() {
+                MUTED
+            } else {
+                TEXT
+            }))
+            .block(panel(" Search  [/] ")),
+        query_row[0],
+    );
+    app.hits.push(Hit {
+        rect: query_row[0],
+        action: ClickAction::SearchInput,
+    });
+    button(
+        frame,
+        query_row[1],
+        if app.searching { "Wait" } else { "Search" },
+        "s",
+        CYAN,
+    );
+    app.hits.push(Hit {
+        rect: query_row[1],
+        action: ClickAction::RunSearch,
+    });
+
+    let show_channel = area.width >= 94;
+    let result_rows: Vec<Row> = app
+        .search_results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let mut cells = vec![
+                Cell::from(format!("{}", index + 1)),
+                Cell::from(result.title.clone()),
+            ];
+            if show_channel {
+                cells.push(Cell::from(result.uploader.clone()));
+            }
+            cells.push(Cell::from(duration(result.duration)));
+            Row::new(cells).style(if index == app.search_index {
+                Style::default()
+                    .fg(BG)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(TEXT)
+                    .bg(if index % 2 == 0 { PANEL } else { PANEL_2 })
+            })
+        })
+        .collect();
+    let headers = if show_channel {
+        vec!["#", "Title", "Artist", "Time"]
+    } else {
+        vec!["#", "Title", "Time"]
+    };
+    let widths = if show_channel {
+        vec![
+            Constraint::Length(3),
+            Constraint::Percentage(58),
+            Constraint::Percentage(29),
+            Constraint::Length(8),
+        ]
+    } else {
+        vec![
+            Constraint::Length(3),
+            Constraint::Min(20),
+            Constraint::Length(8),
+        ]
+    };
+    let title = if app.searching {
+        " Results  searching… ".to_string()
+    } else if !app.search_error.is_empty() {
+        " Search unavailable  ·  press r to retry ".to_string()
+    } else {
+        format!(" Results  {}  ·  ↑↓ select ", app.search_results.len())
+    };
+    let mut table_state = TableState::default().with_selected(app.search_index);
+    frame.render_stateful_widget(
+        Table::new(result_rows, widths)
+            .header(
+                Row::new(headers).style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
+            )
+            .block(panel(&title)),
+        rows[1],
+        &mut table_state,
+    );
+    let offset = table_state.offset();
+    for visible in 0..app.search_results.len().saturating_sub(offset) {
+        let index = offset + visible;
+        let y = rows[1].y + 2 + visible as u16;
+        if y < rows[1].bottom() {
+            app.hits.push(Hit {
+                rect: Rect::new(rows[1].x, y, rows[1].width, 1),
+                action: ClickAction::SearchResult(index),
+            });
+        }
+    }
+
+    let player = Layout::horizontal([
+        Constraint::Min(20),
+        Constraint::Length(10),
+        Constraint::Length(12),
+        Constraint::Length(10),
+    ])
+    .split(rows[2]);
+    let selected = app.search_results.get(app.search_index);
+    let status = match app.playback_state {
+        PlaybackState::Playing => format!("▶  {}", clip(&app.playback_title, 38)),
+        PlaybackState::Paused => format!("Ⅱ  {}", clip(&app.playback_title, 38)),
+        PlaybackState::Loading => format!("◌  {}", clip(&app.playback_title, 38)),
+        PlaybackState::Stopped if !app.music_queue.is_empty() => {
+            format!("Up Next paused  ·  {} remaining", app.music_queue.len())
+        }
+        PlaybackState::Stopped => selected.map_or_else(
+            || "Search, select, then press Enter".into(),
+            |result| format!("{}  ·  {}", clip(&result.title, 28), result.uploader),
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(
+                Style::default().fg(if app.playback_state == PlaybackState::Stopped {
+                    MUTED
+                } else {
+                    GREEN
+                }),
+            )
+            .block(panel(&format!(
+                " Now playing  ·  Quick DL: {} ",
+                app.presets[app.preset_index].name
+            ))),
+        player[0],
+    );
+    button(frame, player[1], "Prev", "B", CYAN);
+    button(
+        frame,
+        player[2],
+        match app.playback_state {
+            PlaybackState::Playing => "Pause",
+            PlaybackState::Paused => "Resume",
+            PlaybackState::Loading => "Wait",
+            PlaybackState::Stopped if !app.music_queue.is_empty() => "Resume",
+            PlaybackState::Stopped => "Play",
+        },
+        "␠",
+        GREEN,
+    );
+    button(frame, player[3], "Next", "N", CYAN);
+    app.hits.extend([
+        Hit {
+            rect: player[1],
+            action: ClickAction::PreviousTrack,
+        },
+        Hit {
+            rect: player[2],
+            action: ClickAction::TogglePlayback,
+        },
+        Hit {
+            rect: player[3],
+            action: ClickAction::NextTrack,
+        },
+    ]);
+
+    let action_rows =
+        Layout::vertical([Constraint::Length(3), Constraint::Length(3)]).split(rows[3]);
+    let primary = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(action_rows[0]);
+    let downloads = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(action_rows[1]);
+    button(frame, primary[0], "Play", "Enter", GREEN);
+    button(frame, primary[1], "Queue", "a", CYAN);
+    button(frame, primary[2], "Playlist", "l", CYAN);
+    button(frame, downloads[0], "Options", "⇧Enter", ORANGE);
+    button(frame, downloads[1], "Quick", "⌃Enter", GREEN);
+    app.hits.extend([
+        Hit {
+            rect: primary[0],
+            action: ClickAction::PlaySearchResult,
+        },
+        Hit {
+            rect: primary[1],
+            action: ClickAction::EnqueueSearchResult,
+        },
+        Hit {
+            rect: primary[2],
+            action: ClickAction::OpenPlaylistPicker,
+        },
+        Hit {
+            rect: downloads[0],
+            action: ClickAction::OpenDownloadOptions,
+        },
+        Hit {
+            rect: downloads[1],
+            action: ClickAction::QuickDownloadPreset,
+        },
+    ]);
 }
 
 fn media_player(
@@ -632,9 +911,11 @@ fn media_player(
 ) {
     let transport = Layout::horizontal([
         Constraint::Min(16),
+        Constraint::Length(9),
         Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(10),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
     ])
     .split(transport_area);
     let mode = if app.playback_mode == PlayerMode::Video {
@@ -643,7 +924,10 @@ fn media_player(
         "audio"
     };
     let player_status = match app.playback_state {
-        PlaybackState::Stopped => "Ready · choose audio or video",
+        PlaybackState::Stopped if !app.music_queue.is_empty() => {
+            "Up Next paused · resume when ready"
+        }
+        PlaybackState::Stopped => "Ready · Enter plays selected song",
         PlaybackState::Loading => "◌  Connecting full stream…",
         PlaybackState::Playing => {
             if app.playback_mode == PlayerMode::Video {
@@ -665,9 +949,23 @@ fn media_player(
             .block(panel(&format!(" Player  {mode}  ·  [Space] play/pause "))),
         transport[0],
     );
-    button(frame, transport[1], "Audio", "p", GREEN);
-    button(frame, transport[2], "Video", "P", CYAN);
-    button(frame, transport[3], "Stop", "x", RED);
+    button(frame, transport[1], "Prev", "B", CYAN);
+    button(
+        frame,
+        transport[2],
+        match app.playback_state {
+            PlaybackState::Playing => "Pause",
+            PlaybackState::Paused => "Resume",
+            PlaybackState::Loading => "Wait",
+            PlaybackState::Stopped if !app.music_queue.is_empty() => "Resume",
+            PlaybackState::Stopped => "Play",
+        },
+        "␠",
+        GREEN,
+    );
+    button(frame, transport[3], "Next", "N", CYAN);
+    button(frame, transport[4], "Video", "P", CYAN);
+    button(frame, transport[5], "Stop", "x", RED);
     app.hits.extend([
         Hit {
             rect: transport[0],
@@ -675,14 +973,22 @@ fn media_player(
         },
         Hit {
             rect: transport[1],
-            action: ClickAction::PlayAudio,
+            action: ClickAction::PreviousTrack,
         },
         Hit {
             rect: transport[2],
-            action: ClickAction::PlayVideo,
+            action: ClickAction::TogglePlayback,
         },
         Hit {
             rect: transport[3],
+            action: ClickAction::NextTrack,
+        },
+        Hit {
+            rect: transport[4],
+            action: ClickAction::PlayVideo,
+        },
+        Hit {
+            rect: transport[5],
             action: ClickAction::StopPlayback,
         },
     ]);
@@ -850,6 +1156,228 @@ fn slider_position(index: usize, len: usize, width: usize) -> usize {
     }
 }
 
+fn playlists(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Min(10), Constraint::Length(7)]).split(area);
+    let cols = Layout::horizontal([
+        Constraint::Percentage(25),
+        Constraint::Percentage(50),
+        Constraint::Percentage(25),
+    ])
+    .split(rows[0]);
+
+    let playlist_items: Vec<ListItem> = app
+        .playlists
+        .iter()
+        .enumerate()
+        .map(|(index, playlist)| {
+            let selected = index == app.playlist_index;
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if selected { "● " } else { "  " },
+                    Style::default().fg(CYAN),
+                ),
+                Span::styled(
+                    playlist.name.clone(),
+                    Style::default()
+                        .fg(if selected { TEXT } else { MUTED })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    format!("  {}", playlist.tracks.len()),
+                    Style::default().fg(MUTED),
+                ),
+            ]))
+        })
+        .collect();
+    let playlist_title = if app.playlist_focus == PlaylistFocus::Playlists {
+        " Playlists  ● focused  [c] new  [r] rename  [x] delete "
+    } else {
+        " Playlists  [h/←] focus "
+    };
+    frame.render_widget(
+        List::new(playlist_items).block(panel(playlist_title)),
+        cols[0],
+    );
+    for index in 0..app.playlists.len() {
+        let y = cols[0].y + 1 + index as u16;
+        if y < cols[0].bottom().saturating_sub(1) {
+            app.hits.push(Hit {
+                rect: Rect::new(cols[0].x + 1, y, cols[0].width.saturating_sub(2), 1),
+                action: ClickAction::Playlist(index),
+            });
+        }
+    }
+
+    let tracks = app
+        .playlists
+        .get(app.playlist_index)
+        .map(|playlist| playlist.tracks.as_slice())
+        .unwrap_or_default();
+    let track_rows: Vec<Row> = tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| {
+            Row::new([
+                Cell::from(format!("{}", index + 1)),
+                Cell::from(track.title.clone()),
+                Cell::from(track.artist.clone()),
+                Cell::from(duration(track.duration)),
+            ])
+            .style(if index == app.playlist_track_index {
+                Style::default()
+                    .fg(BG)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            })
+        })
+        .collect();
+    let title = app.playlists.get(app.playlist_index).map_or_else(
+        || " Tracks  create your first playlist with [c] ".into(),
+        |playlist| {
+            if app.playlist_focus == PlaylistFocus::Tracks {
+                format!(
+                    " {}  ● focused  [Enter] play  [a] queue  [x] remove ",
+                    playlist.name
+                )
+            } else {
+                format!(" {}  [l/→] focus tracks ", playlist.name)
+            }
+        },
+    );
+    let mut state = TableState::default().with_selected(app.playlist_track_index);
+    frame.render_stateful_widget(
+        Table::new(
+            track_rows,
+            [
+                Constraint::Length(4),
+                Constraint::Percentage(52),
+                Constraint::Percentage(33),
+                Constraint::Length(9),
+            ],
+        )
+        .header(
+            Row::new(["#", "Title", "Artist", "Length"])
+                .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
+        )
+        .block(panel(&title)),
+        cols[1],
+        &mut state,
+    );
+    let offset = state.offset();
+    for visible in 0..tracks.len().saturating_sub(offset) {
+        let index = offset + visible;
+        let y = cols[1].y + 2 + visible as u16;
+        if y < cols[1].bottom().saturating_sub(1) {
+            app.hits.push(Hit {
+                rect: Rect::new(cols[1].x + 1, y, cols[1].width.saturating_sub(2), 1),
+                action: ClickAction::PlaylistTrack(index),
+            });
+        }
+    }
+
+    let queue_items: Vec<ListItem> = app
+        .music_queue
+        .iter()
+        .enumerate()
+        .map(|(index, track)| {
+            let selected = index == app.music_queue_index;
+            ListItem::new(vec![
+                Line::styled(
+                    format!("{} {}", if selected { "›" } else { " " }, track.title),
+                    if selected {
+                        Style::default()
+                            .fg(BG)
+                            .bg(CYAN)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(TEXT)
+                    },
+                ),
+                Line::styled(format!("   {}", track.artist), Style::default().fg(MUTED)),
+            ])
+        })
+        .collect();
+    let queue_title = if app.playlist_focus == PlaylistFocus::UpNext {
+        " Up Next  ● focused  [Enter] play  [x] remove "
+    } else {
+        " Up Next  [l/→] focus "
+    };
+    frame.render_widget(List::new(queue_items).block(panel(queue_title)), cols[2]);
+    for index in 0..app.music_queue.len() {
+        let y = cols[2].y + 1 + index as u16 * 2;
+        if y < cols[2].bottom().saturating_sub(1) {
+            app.hits.push(Hit {
+                rect: Rect::new(cols[2].x + 1, y, cols[2].width.saturating_sub(2), 2),
+                action: ClickAction::MusicQueueTrack(index),
+            });
+        }
+    }
+
+    let bottom = Layout::horizontal([
+        Constraint::Min(24),
+        Constraint::Length(11),
+        Constraint::Length(12),
+        Constraint::Length(11),
+        Constraint::Length(11),
+    ])
+    .split(rows[1]);
+    let now = app.current_track.as_ref().map_or_else(
+        || "Nothing playing".into(),
+        |track| {
+            format!(
+                "{}\n{}  ·  {}",
+                track.title,
+                track.artist,
+                duration(track.duration)
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(now)
+            .style(Style::default().fg(TEXT))
+            .block(panel(&format!(
+                " Now playing  ·  {} in Up Next ",
+                app.music_queue.len()
+            )))
+            .wrap(Wrap { trim: true }),
+        bottom[0],
+    );
+    if app.playback_state != PlaybackState::Stopped {
+        app.hits.push(Hit {
+            rect: bottom[0],
+            action: ClickAction::TogglePlayback,
+        });
+    }
+    button(frame, bottom[1], "Prev", "B", CYAN);
+    button(frame, bottom[2], "Play", "Enter", GREEN);
+    button(frame, bottom[3], "Next", "N", CYAN);
+    button(frame, bottom[4], "Queue", "a", ORANGE);
+    app.hits.extend([
+        Hit {
+            rect: bottom[1],
+            action: ClickAction::PreviousTrack,
+        },
+        Hit {
+            rect: bottom[2],
+            action: ClickAction::PlayPlaylistTrack,
+        },
+        Hit {
+            rect: bottom[3],
+            action: ClickAction::NextTrack,
+        },
+        Hit {
+            rect: bottom[4],
+            action: ClickAction::EnqueuePlaylistTrack,
+        },
+    ]);
+}
+
 fn queue(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::vertical([Constraint::Min(8), Constraint::Length(5)]).split(area);
     let jobs: Vec<Job> = app.queue_jobs().into_iter().cloned().collect();
@@ -966,13 +1494,19 @@ fn history(frame: &mut Frame, app: &mut App, area: Rect) {
             )
         })
         .unwrap_or_else(|| "Completed, failed and cancelled jobs appear here.".into());
-    let detail_cols =
-        Layout::horizontal([Constraint::Min(24), Constraint::Length(14)]).split(chunks[1]);
+    let detail_cols = Layout::horizontal([
+        Constraint::Min(24),
+        Constraint::Length(12),
+        Constraint::Length(12),
+    ])
+    .split(chunks[1]);
     frame.render_widget(
         Paragraph::new(detail)
             .style(Style::default().fg(MUTED))
             .wrap(Wrap { trim: true })
-            .block(panel(" Result  [r] retry  [R] force retry  [c] command ")),
+            .block(panel(
+                " Result  [Enter] command  [r/R] retry  [c] clear history ",
+            )),
         detail_cols[0],
     );
     if !jobs.is_empty() {
@@ -980,6 +1514,11 @@ fn history(frame: &mut Frame, app: &mut App, area: Rect) {
         app.hits.push(Hit {
             rect: detail_cols[1],
             action: ClickAction::Retry,
+        });
+        button(frame, detail_cols[2], "Clear", "c", RED);
+        app.hits.push(Hit {
+            rect: detail_cols[2],
+            action: ClickAction::ClearHistory,
         });
     }
 }
@@ -1167,7 +1706,7 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     let key_text = Text::from(vec![
         heading("Navigation"),
-        kv("1…7", "switch tabs"),
+        kv("1…8", "switch tabs"),
         kv("Ctrl ←/→", "previous / next tab"),
         kv("?", "this help"),
         kv("q / Ctrl-C", "quit safely"),
@@ -1183,11 +1722,15 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
         kv("c", "inspect exact command"),
         kv("o", "search every yt-dlp option"),
         Line::raw(""),
-        heading("YouTube search"),
+        heading("Music search"),
         kv("/ / e", "edit query and search"),
         kv("s / r", "search / retry"),
-        kv("Enter", "use selected result"),
-        kv("a / d", "queue / queue and view"),
+        kv("Enter", "play selected song now"),
+        kv("Shift+Enter", "open global download options"),
+        kv("Ctrl+Enter", "quick download with global preset"),
+        kv("a / n", "add to Up Next / play next"),
+        kv("l", "save to a custom playlist"),
+        kv("d / D", "download Search mix / open queue"),
         kv("i", "inspect selected result"),
         kv("v", "full-screen viu preview"),
         kv("[ / ]", "lower / raise video quality"),
@@ -1198,12 +1741,20 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
         kv("← / →", "seek 5s (Shift: 30s)"),
         kv("- / + / m", "volume down / up / mute"),
         kv(", / . / 0", "speed down / up / reset"),
+        kv("B / N", "previous / next song"),
+        Line::raw(""),
+        heading("Playlists"),
+        kv("c / r", "create / rename playlist"),
+        kv("h / l", "focus playlists / tracks"),
+        kv("Enter / a", "play / add track to Up Next"),
+        kv("x", "delete playlist or remove track"),
         Line::raw(""),
         heading("Queue & history"),
         kv("p", "pause / resume process"),
         kv("x", "cancel, keeping partial"),
         kv("r", "retry safely"),
         kv("R", "retry and overwrite"),
+        kv("c (History)", "clear history, keep files"),
     ]);
     frame.render_widget(
         Paragraph::new(key_text)
@@ -1242,8 +1793,10 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn footer(frame: &mut Frame, app: &App, area: Rect) {
-    let style = if app.notice.to_ascii_lowercase().contains("could not")
-        || app.notice.to_ascii_lowercase().contains("stopped")
+    let notice = app.notice.to_ascii_lowercase();
+    let style = if notice.contains("could not")
+        || notice.contains("unavailable")
+        || notice.contains("failed")
     {
         Style::default().fg(RED)
     } else {
@@ -1302,6 +1855,26 @@ fn modal(frame: &mut Frame, app: &mut App) {
         }
         Modal::Command(command) => frame.render_widget(Paragraph::new(command).style(Style::default().fg(GREEN)).wrap(Wrap { trim: false }).block(dialog(" Exact command ", " Enter/Esc close ")), area),
         Modal::ConfirmCancel(_) => frame.render_widget(Paragraph::new("Cancel this download?\n\nThe process will stop, but .part files remain so a retry can continue from the downloaded bytes.").style(Style::default().fg(TEXT)).alignment(Alignment::Center).wrap(Wrap { trim: true }).block(dialog(" Confirm cancel ", " y/Enter cancel  •  n/Esc keep running ")), area),
+        Modal::PickPlaylist { selected } => {
+            let lines: Vec<Line> = app.playlists.iter().enumerate().map(|(index, playlist)| {
+                Line::styled(
+                    format!("{} {}  ·  {} tracks", if index == selected { "›" } else { " " }, playlist.name, playlist.tracks.len()),
+                    if index == selected { Style::default().fg(BG).bg(CYAN).add_modifier(Modifier::BOLD) } else { Style::default().fg(TEXT) },
+                )
+            }).collect();
+            frame.render_widget(Paragraph::new(lines).block(dialog(" Save song to playlist ", " ↑↓ choose  •  Enter save  •  c new  •  Esc cancel ")), area);
+            for index in 0..app.playlists.len() {
+                let y = area.y + 2 + index as u16;
+                if y < area.bottom().saturating_sub(2) {
+                    app.hits.push(Hit { rect: Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1), action: ClickAction::PickPlaylist(index) });
+                }
+            }
+        }
+        Modal::ConfirmDeletePlaylist(index) => {
+            let name = app.playlists.get(index).map_or("this playlist", |playlist| playlist.name.as_str());
+            frame.render_widget(Paragraph::new(format!("Delete “{name}”?\n\nDownloaded files are untouched. This only removes the saved playlist.")).style(Style::default().fg(TEXT)).alignment(Alignment::Center).wrap(Wrap { trim: true }).block(dialog(" Delete playlist ", " y/Enter delete  •  n/Esc cancel ")), area);
+        }
+        Modal::ConfirmClearHistory => frame.render_widget(Paragraph::new("Clear all completed, failed, and cancelled entries?\n\nDownloaded files and the download archive remain untouched.").style(Style::default().fg(TEXT)).alignment(Alignment::Center).wrap(Wrap { trim: true }).block(dialog(" Clear download history ", " y/Enter clear  •  n/Esc cancel ")), area),
         Modal::Error(error) => frame.render_widget(Paragraph::new(error).style(Style::default().fg(RED)).wrap(Wrap { trim: true }).block(dialog(" Something needs attention ", " Enter/Esc close ")), area),
     }
     let close = Rect::new(area.right().saturating_sub(4), area.y + 1, 3, 1);
@@ -1318,9 +1891,8 @@ fn modal(frame: &mut Frame, app: &mut App) {
 fn panel(title: &str) -> Block<'_> {
     Block::default()
         .title(title)
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(43, 60, 78)))
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::Rgb(35, 50, 66)))
         .style(Style::default().bg(PANEL))
         .padding(Padding::horizontal(1))
 }
@@ -1329,11 +1901,24 @@ fn tab_caption(tab: Tab) -> &'static str {
     match tab {
         Tab::Download => "↓ Download",
         Tab::Search => "⌕ Search",
+        Tab::Playlists => "♫ Playlists",
         Tab::Queue => "≡ Queue",
         Tab::History => "◷ History",
         Tab::Settings => "⚙ Settings",
         Tab::Logs => "≣ Logs",
         Tab::Help => "? Help",
+    }
+}
+fn tab_caption_compact(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Search => "Find",
+        Tab::Playlists => "Lists",
+        Tab::Download => "Get",
+        Tab::Queue => "Queue",
+        Tab::History => "Past",
+        Tab::Settings => "Set",
+        Tab::Logs => "Logs",
+        Tab::Help => "Help",
     }
 }
 fn dialog<'a>(title: &'a str, footer: &'a str) -> Block<'a> {
@@ -1350,25 +1935,31 @@ fn dialog<'a>(title: &'a str, footer: &'a str) -> Block<'a> {
         .padding(Padding::new(2, 2, 1, 1))
 }
 fn button(frame: &mut Frame, area: Rect, label: &str, key: &str, color: Color) {
+    let full = format!("{label}[{key}]");
+    let short = if area.width >= UnicodeWidthStr::width(full.as_str()) as u16 + 2 {
+        full
+    } else {
+        format!("[{key}]")
+    };
+    let line_area = Rect::new(
+        area.x,
+        area.y.saturating_add(area.height.saturating_sub(1) / 2),
+        area.width,
+        1,
+    );
     frame.render_widget(
-        Paragraph::new(
-            Line::from(vec![
-                Span::styled(label, Style::default().fg(BG).add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    format!(" [{key}]"),
-                    Style::default().fg(Color::Rgb(45, 60, 70)),
-                ),
-            ])
-            .alignment(Alignment::Center),
-        )
-        .style(Style::default().bg(color))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(color)),
-        ),
-        area,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "› ",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                short,
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .alignment(Alignment::Center),
+        line_area,
     );
 }
 fn centered(width_pct: u16, height_pct: u16, r: Rect) -> Rect {
@@ -1461,4 +2052,77 @@ fn kv<'a>(key: &'a str, value: &'a str) -> Line<'a> {
         ),
         Span::styled(value, Style::default().fg(TEXT)),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{MusicTrack, PersistedState},
+        ytdlp::SearchResult,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn rendered_search(width: u16, height: u16) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().join("state.json"),
+            PersistedState::default(),
+            String::new(),
+        );
+        app.search_query = "daft punk".into();
+        app.search_results.push(SearchResult {
+            id: "track".into(),
+            title: "Something About Us".into(),
+            uploader: "Daft Punk".into(),
+            duration: Some(232.0),
+            url: "https://example.com/track".into(),
+            thumbnail_url: String::new(),
+            view_count: Some(1),
+            live_status: String::new(),
+        });
+        app.music_queue.push_back(MusicTrack {
+            title: "Digital Love".into(),
+            artist: "Daft Punk".into(),
+            url: "https://example.com/next".into(),
+            ..Default::default()
+        });
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn compact_search_keeps_primary_actions_and_resume_visible() {
+        let screen = rendered_search(92, 34);
+        for label in [
+            "Play",
+            "Queue",
+            "Playlist",
+            "Options[⇧Enter]",
+            "Quick[⌃Enter]",
+            "Resume",
+            "Resume[␠]",
+            "Up Next paused",
+        ] {
+            assert!(screen.contains(label), "compact screen omitted {label}");
+        }
+    }
+
+    #[test]
+    fn compact_tabs_keep_all_destinations_visible() {
+        let screen = rendered_search(92, 34);
+        for label in [
+            "Find", "Lists", "Get", "Queue", "Past", "Set", "Logs", "Help",
+        ] {
+            assert!(screen.contains(label), "compact tabs omitted {label}");
+        }
+    }
 }

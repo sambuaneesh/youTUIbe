@@ -205,6 +205,59 @@ pub struct Job {
     pub command_preview: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MusicTrack {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration: Option<f64>,
+    pub url: String,
+    pub thumbnail_url: String,
+}
+
+impl Default for MusicTrack {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: "Unknown track".into(),
+            artist: "Unknown artist".into(),
+            duration: None,
+            url: String::new(),
+            thumbnail_url: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MusicPlaylist {
+    pub id: Uuid,
+    pub name: String,
+    pub tracks: Vec<MusicTrack>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Default for MusicPlaylist {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: "New playlist".into(),
+            tracks: Vec::new(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+impl MusicPlaylist {
+    pub fn named(name: String) -> Self {
+        Self {
+            name,
+            ..Self::default()
+        }
+    }
+}
+
 impl Job {
     pub fn new(url: String, preset: String, options: DownloadOptions) -> Self {
         Self {
@@ -330,4 +383,8 @@ pub fn presets() -> Vec<Preset> {
 pub struct PersistedState {
     pub settings: Settings,
     pub jobs: Vec<Job>,
+    pub current_track: Option<MusicTrack>,
+    pub music_queue: Vec<MusicTrack>,
+    pub playlists: Vec<MusicPlaylist>,
+    pub recently_played: Vec<MusicTrack>,
 }

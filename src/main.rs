@@ -7,7 +7,7 @@ mod ui;
 mod ytdlp;
 
 use anyhow::{Context, Result};
-use app::App;
+use app::{App, Tab};
 use clap::Parser;
 use crossterm::{
     cursor::MoveTo,
@@ -75,6 +75,9 @@ async fn main() -> Result<()> {
     let help_text = load_help(&state.settings.yt_dlp_path).await;
     let mut app = App::new(state_path, state, help_text);
     app.url = cli.urls.join(" ");
+    if !app.url.is_empty() {
+        app.tab = Tab::Download;
+    }
     if let Err(error) = thumbnail_cache::ensure_registration() {
         app.notice = format!("Desktop artwork integration unavailable: {error}");
     }
