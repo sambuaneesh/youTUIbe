@@ -16,6 +16,6 @@ pkgbase = youtuibe-bin
 	provides = youtuibe
 	conflicts = youtuibe
 	source = youtuibe-0.2.0-x86_64-unknown-linux-gnu.tar.gz::https://github.com/sambuaneesh/youTUIbe/releases/download/v0.2.0/youtuibe-0.2.0-x86_64-unknown-linux-gnu.tar.gz
-	sha256sums = SKIP
+	sha256sums = 4625e690fd73baa2732e554779b8e1539f6a4ad5657793b374cf3bdd68c39f90
 
 pkgname = youtuibe-bin
